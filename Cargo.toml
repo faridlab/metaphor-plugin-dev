@@ -1,0 +1,60 @@
+[package]
+name = "metaphor-plugin-dev"
+version = "0.1.0"
+edition = "2021"
+description = "Development workflow plugin for Metaphor CLI (dev, lint, test, docs, config, jobs)"
+authors = ["Farid Hidayat"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/faridlab/metaphor-plugin-dev"
+keywords = ["cli", "development", "workflow", "testing", "rust"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "metaphor-dev"
+path = "src/main.rs"
+
+[lib]
+name = "metaphor_dev"
+path = "src/lib.rs"
+
+[dependencies]
+# CLI
+clap = { version = "4", features = ["derive", "env", "color"] }
+colored = "2"
+
+# Error handling
+anyhow = "1"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+serde_yaml = "0.9"
+
+# File system
+walkdir = "2"
+
+# Utilities
+chrono = { version = "0.4", features = ["serde"] }
+regex = "1"
+
+# HTTP client for health checks
+reqwest = { version = "0.11", features = ["json"] }
+
+# SMTP configuration validation
+lettre = { version = "0.11", features = ["smtp-transport", "native-tls", "builder"] }
+
+# URL parsing
+url = "2"
+
+# Environment
+dotenvy = "0.15"
+
+# Logging
+env_logger = "0.11"
+
+# Async traits
+async-trait = "0.1"
