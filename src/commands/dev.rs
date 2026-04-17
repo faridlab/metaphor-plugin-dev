@@ -16,6 +16,8 @@ use std::path::Path;
 use std::collections::HashMap;
 use std::fs;
 
+use crate::project::{self, ResolvedProject};
+
 #[derive(Subcommand)]
 pub enum DevAction {
     /// Start development servers (gRPC + REST + CLI)
@@ -191,32 +193,44 @@ impl Default for DevConfig {
 }
 
 impl DevConfig {
-    /// Load configuration from apps/metaphor/config/
+    /// Load configuration from the resolved project's `config/` directory.
     pub fn load() -> Result<Self> {
-        // Try to load from apps/metaphor/config/application.yml
-        let config_path = "apps/metaphor/config/application.yml";
+        match project::resolve() {
+            Ok(project) => Self::load_from(&project.config_dir),
+            Err(e) => {
+                println!("⚠️  {}, using defaults", e);
+                Ok(Self::default())
+            }
+        }
+    }
 
-        if Path::new(config_path).exists() {
-            let content = fs::read_to_string(config_path)
-                .context(format!("Failed to read config file: {}", config_path))?;
+    /// Load configuration from a specific config directory.
+    pub fn load_from(config_dir: &Path) -> Result<Self> {
+        let config_path = config_dir.join("application.yml");
 
-            // Parse YAML (using basic parsing for now, can be enhanced)
+        if config_path.exists() {
+            let content = fs::read_to_string(&config_path)
+                .with_context(|| format!("Failed to read config file: {}", config_path.display()))?;
+
             let mut config = Self::default();
             config = Self::parse_and_merge(&content, config)?;
 
-            // Also load environment-specific config
             let env = std::env::var("APP_ENV").unwrap_or_else(|_| "development".to_string());
-            let env_config_path = format!("apps/metaphor/config/application-{}.yml", env);
+            let env_config_path = config_dir.join(format!("application-{}.yml", env));
 
-            if Path::new(&env_config_path).exists() {
-                let env_content = fs::read_to_string(&env_config_path)
-                    .context(format!("Failed to read env config file: {}", env_config_path))?;
+            if env_config_path.exists() {
+                let env_content = fs::read_to_string(&env_config_path).with_context(|| {
+                    format!("Failed to read env config file: {}", env_config_path.display())
+                })?;
                 config = Self::parse_and_merge(&env_content, config)?;
             }
 
             Ok(config)
         } else {
-            println!("⚠️  Configuration file not found at {}, using defaults", config_path);
+            println!(
+                "⚠️  Configuration file not found at {}, using defaults",
+                config_path.display()
+            );
             Ok(Self::default())
         }
     }
@@ -321,25 +335,28 @@ impl DevConfig {
         enabled_services
     }
 
-    /// Save configuration to apps/metaphor/config/application.yml
+    /// Save configuration to the resolved project's `config/application.yml`.
     pub fn save(&self) -> Result<()> {
-        let config_dir = "apps/metaphor/config";
+        let project = project::resolve()
+            .context("cannot save config: project could not be resolved")?;
+        self.save_to(&project.config_dir)
+    }
 
-        // Create config directory if it doesn't exist
-        fs::create_dir_all(config_dir)
-            .context(format!("Failed to create config directory: {}", config_dir))?;
+    /// Save configuration to a specific config directory.
+    pub fn save_to(&self, config_dir: &Path) -> Result<()> {
+        fs::create_dir_all(config_dir).with_context(|| {
+            format!("Failed to create config directory: {}", config_dir.display())
+        })?;
 
-        let config_path = format!("{}/application.yml", config_dir);
+        let config_path = config_dir.join("application.yml");
 
-        // Serialize to YAML
         let yaml_content = serde_yaml::to_string(self)
             .context("Failed to serialize configuration to YAML")?;
 
-        // Write to file
         fs::write(&config_path, yaml_content)
-            .context(format!("Failed to write config file: {}", config_path))?;
+            .with_context(|| format!("Failed to write config file: {}", config_path.display()))?;
 
-        println!("💾 Configuration saved to {}", config_path);
+        println!("💾 Configuration saved to {}", config_path.display());
         Ok(())
     }
 }
@@ -480,36 +497,41 @@ async fn start_local_dev_server(grpc_only: bool, rest_only: bool, port: u16) -> 
         return Ok(());
     }
 
-    // Change to apps/metaphor directory and run the local service
-    println!("🚀 Starting Metaphor application locally...");
+    // Resolve the target app (reads metaphor.yaml or walks up to a Cargo bin crate).
+    let project: ResolvedProject = project::resolve()
+        .context("Failed to resolve target project for `dev serve`")?;
 
-    let cargo_cmd = if grpc_only {
-        // For gRPC-only mode, we might need to add a flag to the main app
-        "cargo run --bin metaphor-app -- --grpc-only"
+    println!(
+        "🚀 Starting {} locally from {}...",
+        project.bin_name.bright_cyan(),
+        project.app_dir.display()
+    );
+
+    let mode_suffix = if grpc_only {
+        " -- --grpc-only"
     } else if rest_only {
-        // For REST-only mode
-        "cargo run --bin metaphor-app -- --rest-only"
+        " -- --rest-only"
     } else {
-        // Default: both gRPC and REST
-        "cargo run --bin metaphor-app"
+        ""
     };
+    println!(
+        "📝 Running: {}",
+        format!("cargo run --bin {}{}", project.bin_name, mode_suffix).bright_cyan()
+    );
 
-    println!("📝 Running: {}", cargo_cmd.bright_cyan());
-
-    // Execute cargo run in the apps/metaphor directory
     let mut cmd = std::process::Command::new("cargo");
-    cmd.args(&["run", "--bin", "metaphor-app"])
-        .current_dir("apps/metaphor");
+    cmd.args(["run", "--bin", &project.bin_name])
+        .current_dir(&project.app_dir);
 
     if grpc_only {
-        cmd.args(&["--", "--grpc-only"]);
+        cmd.args(["--", "--grpc-only"]);
     } else if rest_only {
-        cmd.args(&["--", "--rest-only"]);
+        cmd.args(["--", "--rest-only"]);
     }
 
-    // Set environment variables for development
+    // Only set APP_ENV; leave DATABASE_URL to the app's config/env so we don't
+    // bake a specific project's DB name into the plugin.
     cmd.env("APP_ENV", "development");
-    cmd.env("DATABASE_URL", "postgresql://postgres:password@localhost:5432/bersihirdb");
 
     println!("🔗 Available endpoints:");
     println!("   🌐 REST API: http://localhost:{}/api/v1", config.server.port);
