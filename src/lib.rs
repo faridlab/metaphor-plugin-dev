@@ -3,3 +3,4 @@
 //! This plugin provides: dev, lint, test, docs, config, jobs.
 
 pub mod commands;
+pub mod project;
