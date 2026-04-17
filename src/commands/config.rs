@@ -5,7 +5,9 @@
 
 use anyhow::Result;
 use colored::*;
-use std::path::Path;
+use std::path::{Path, PathBuf};
+
+use crate::project;
 
 /// Severity level for configuration issues
 #[derive(Debug, Clone, PartialEq)]
@@ -307,31 +309,25 @@ fn validate_config_files(environment: &str) -> Vec<ConfigIssue> {
     let mut issues = Vec::new();
     let is_dev = environment == "development" || environment == "dev" || environment == "local";
 
-    // Check base config exists
-    let base_config = Path::new("config/application.yml");
-    if !base_config.exists() {
-        // Also check apps/metaphor/config/
-        let alt_config = Path::new("apps/metaphor/config/application.yml");
-        if !alt_config.exists() {
-            issues.push(ConfigIssue {
-                severity: Severity::Warning,
-                category: "config".to_string(),
-                message: "No application.yml found in config/ or apps/metaphor/config/".to_string(),
-                suggestion: Some("Configuration will use code defaults only".to_string()),
-                line: None,
-            });
-            return issues;
-        }
-    }
-
-    // Try to parse the config file
-    let config_path = if base_config.exists() {
-        base_config
-    } else {
-        Path::new("apps/metaphor/config/application.yml")
+    // Resolve config path: prefer a target project's config dir (via metaphor.yaml
+    // discovery), fall back to plain `config/application.yml` in the CWD.
+    let config_path: PathBuf = match project::resolve() {
+        Ok(p) => p.config_dir.join("application.yml"),
+        Err(_) => PathBuf::from("config/application.yml"),
     };
 
-    let content = match std::fs::read_to_string(config_path) {
+    if !config_path.exists() {
+        issues.push(ConfigIssue {
+            severity: Severity::Warning,
+            category: "config".to_string(),
+            message: format!("No application.yml found at {}", config_path.display()),
+            suggestion: Some("Configuration will use code defaults only".to_string()),
+            line: None,
+        });
+        return issues;
+    }
+
+    let content = match std::fs::read_to_string(&config_path) {
         Ok(c) => c,
         Err(e) => {
             issues.push(ConfigIssue {
@@ -390,19 +386,22 @@ fn validate_config_files(environment: &str) -> Vec<ConfigIssue> {
         }
     }
 
-    // Check environment-specific config
-    let env_config = format!("config/application-{}.yml", environment);
-    if !Path::new(&env_config).exists() && !is_dev {
-        let alt_env_config = format!("apps/metaphor/config/application-{}.yml", environment);
-        if !Path::new(&alt_env_config).exists() {
-            issues.push(ConfigIssue {
-                severity: Severity::Info,
-                category: "config".to_string(),
-                message: format!("No environment-specific config found for '{}'", environment),
-                suggestion: Some(format!("Create {} for environment-specific overrides", env_config)),
-                line: None,
-            });
-        }
+    // Check environment-specific config — same resolution rule as the base config.
+    let env_config_path: PathBuf = config_path
+        .parent()
+        .unwrap_or_else(|| Path::new("."))
+        .join(format!("application-{}.yml", environment));
+    if !env_config_path.exists() && !is_dev {
+        issues.push(ConfigIssue {
+            severity: Severity::Info,
+            category: "config".to_string(),
+            message: format!("No environment-specific config found for '{}'", environment),
+            suggestion: Some(format!(
+                "Create {} for environment-specific overrides",
+                env_config_path.display()
+            )),
+            line: None,
+        });
     }
 
     issues
