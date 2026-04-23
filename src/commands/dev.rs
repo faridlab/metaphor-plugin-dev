@@ -959,5 +959,5 @@ fn provide_dev_setup_instructions() {
     println!();
 
     println!("🚀 Now you're ready to develop!");
-    println!("💡 Check the generated files in apps/metaphor/demo/");
+    println!("💡 Check the generated files under your app's demo/ directory");
 }
