@@ -4,9 +4,9 @@ Complete reference for all configuration files and environment variables used by
 
 ## Configuration Files
 
-### `apps/metaphor/config/application.yml`
+### `<app_dir>/config/application.yml`
 
-The main application configuration file. Loaded by `DevConfig::load()` when running `metaphor-dev dev serve`.
+The main application configuration file. Loaded by `DevConfig::load()` when running `metaphor-dev dev serve`. `<app_dir>` is resolved from `metaphor.yaml` (the backend-service project containing the CWD, or the sole `backend-service` entry) — for example `apps/bersihir-service/config/application.yml`.
 
 ```yaml
 # Server configuration
@@ -51,7 +51,7 @@ modules:
 The configuration system supports environment-specific overlays. After loading the base `application.yml`, it loads an overlay file based on the `APP_ENV` environment variable:
 
 ```
-apps/metaphor/config/application-{APP_ENV}.yml
+<app_dir>/config/application-{APP_ENV}.yml
 ```
 
 For example:
