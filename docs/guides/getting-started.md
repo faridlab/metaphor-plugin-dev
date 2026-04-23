@@ -103,7 +103,7 @@ Start the application locally:
 metaphor-dev dev serve --local
 ```
 
-This runs `cargo run --bin metaphor-app` in the `apps/metaphor/` directory and makes the following endpoints available:
+This resolves the backend-service project from `metaphor.yaml` (or the nearest Cargo bin crate above the CWD) and runs `cargo run --bin <bin_name>` inside its directory, where `<bin_name>` is read from the app's `Cargo.toml`. The following endpoints become available:
 
 | Endpoint | URL |
 |----------|-----|
@@ -137,32 +137,34 @@ metaphor-dev config validate
 
 ## Project Structure
 
-The Metaphor framework follows a modular monolith architecture:
+The Metaphor framework follows a modular monolith architecture. The backend-service app name is whatever you chose when scaffolding (e.g. `bersihir-service`); the plugin discovers it from `metaphor.yaml`.
 
 ```
-your-project/
+your-workspace/
+├── metaphor.yaml        # workspace manifest with projects[]
 ├── apps/
-│   └── metaphor/
+│   └── <service-name>/
+│       ├── Cargo.toml
 │       ├── config/
 │       │   ├── application.yml              # Main configuration
 │       │   └── application-development.yml  # Environment overlay
 │       └── src/
+│           └── main.rs
 ├── libs/
 │   └── modules/
 │       ├── sapiens/    # User management module
 │       ├── postman/    # Email service module
 │       └── bucket/     # File storage module
 ├── .env                # Environment variables
-├── docker-compose.yml  # Docker services
-└── Cargo.toml          # Workspace manifest
+└── docker-compose.yml  # Docker services (optional)
 ```
 
 ### Key directories
 
 | Directory | Purpose |
 |-----------|---------|
-| `apps/metaphor/` | Main application binary |
-| `apps/metaphor/config/` | YAML configuration files |
+| `apps/<service-name>/` | Backend-service binary (resolved from `metaphor.yaml`) |
+| `apps/<service-name>/config/` | YAML configuration files read by `dev serve` and `config validate` |
 | `libs/modules/{name}/` | Individual domain modules |
 | `libs/modules/{name}/proto/` | Protocol Buffer definitions |
 | `libs/modules/{name}/tests/` | Module test files |

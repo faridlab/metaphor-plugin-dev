@@ -37,8 +37,9 @@ metaphor-dev dev serve --local
 ```
 
 Local mode:
-- Runs `cargo run --bin metaphor-app` in `apps/metaphor/`
+- Resolves the backend-service project from `metaphor.yaml` (or the nearest Cargo bin crate above the CWD) and runs `cargo run --bin <bin_name>` inside its directory
 - Sets `APP_ENV=development` automatically
+- Reads `DATABASE_URL` (and other runtime env vars) from your shell or `<app_dir>/config/application.yml` — the plugin no longer injects a default
 - Requires external services (PostgreSQL, etc.) to be running separately
 - Faster startup for iterative development
 
