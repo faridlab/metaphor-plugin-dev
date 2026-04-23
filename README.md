@@ -2,7 +2,7 @@
 
 > Development workflow plugin for Metaphor CLI (dev, lint, test, docs, config, jobs)
 
-[![Version](https://img.shields.io/badge/version-0.1.0-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 
@@ -44,6 +44,15 @@ metaphor-dev dev test --coverage
 # Validate configuration
 metaphor-dev config validate
 ```
+
+### Project discovery
+
+`dev serve` and `config validate` resolve the target app automatically:
+
+1. Walk up from the current directory looking for `metaphor.yaml`. If the CWD is inside one of the `projects[].path` entries, that project is picked. Otherwise the sole `backend-service` entry is used (ambiguity errors out).
+2. If no `metaphor.yaml` is found, fall back to the nearest `Cargo.toml` with a bin target.
+
+Configuration is loaded from `<app_dir>/config/application.yml`, and `cargo run --bin <bin_name>` uses the bin target declared in the app's `Cargo.toml` (explicit `[[bin]]` wins over the package name).
 
 ## Command Summary
 
@@ -154,6 +163,7 @@ metaphor-plugin-dev/
 └── src/
     ├── main.rs             # CLI entry point and command dispatch
     ├── lib.rs              # Library entry point
+    ├── project.rs          # Workspace/app discovery via metaphor.yaml + Cargo.toml
     ├── commands/
     │   ├── mod.rs           # Command module exports
     │   ├── dev.rs           # Development workflow commands
