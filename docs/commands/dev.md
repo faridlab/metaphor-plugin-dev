@@ -27,7 +27,12 @@ metaphor-dev dev serve [OPTIONS]
 
 ### Description
 
-Starts the Metaphor development environment by launching gRPC and REST services. The command loads configuration from `apps/metaphor/config/application.yml` and applies an environment overlay from `apps/metaphor/config/application-{APP_ENV}.yml` when available. If the config file is not found, built-in defaults are used.
+Starts the Metaphor development environment by launching gRPC and REST services. The target app is resolved automatically:
+
+1. Walk up from the current directory to find `metaphor.yaml`. If the CWD is inside one of the `projects[].path` entries, that project is selected; otherwise the sole `backend-service` project is used.
+2. If no `metaphor.yaml` is found, fall back to the nearest Cargo crate with a bin target.
+
+The command then loads configuration from `<app_dir>/config/application.yml` and applies an environment overlay from `<app_dir>/config/application-{APP_ENV}.yml` when available. If the config file is not found, built-in defaults are used.
 
 By default, all services are started in local mode using `cargo run`. You can restrict which services start with `--grpc-only` or `--rest-only`, and choose the orchestration method with `--docker` or `--local`.
 
@@ -69,7 +74,7 @@ Once the server is running, the following endpoints are available:
 
 ### Behavior Details
 
-- **Local mode** (default): Runs `cargo run --bin metaphor-app` in the `apps/metaphor` directory. Sets `APP_ENV=development` and `DATABASE_URL` environment variables automatically.
+- **Local mode** (default): Runs `cargo run --bin <bin_name>` inside the resolved app directory, where `<bin_name>` is taken from the app's `Cargo.toml` (the first `[[bin]]` entry, or the package name if `src/main.rs` is present). Sets `APP_ENV=development`; `DATABASE_URL` is read from the app's config/env rather than being injected by the plugin.
 - **Docker mode**: Checks for the `docker-compose` binary and a `docker-compose.yml` file, then starts services via `docker-compose up -d`. After startup, performs HTTP health checks on all enabled services with a 5-second timeout. The health check endpoint is `/health` for every service.
 
 ### Examples
@@ -271,7 +276,7 @@ metaphor-dev dev db reset --force
 
 ## Configuration
 
-The `dev` commands load configuration from `apps/metaphor/config/application.yml`. The `DevConfig` struct contains the following sections:
+The `dev` commands load configuration from `<app_dir>/config/application.yml`, where `<app_dir>` is the resolved backend-service project. The `DevConfig` struct contains the following sections:
 
 | Section | Description | Defaults |
 |---------|-------------|----------|
@@ -281,7 +286,7 @@ The `dev` commands load configuration from `apps/metaphor/config/application.yml
 
 ### Environment Overlays
 
-Configuration supports environment-specific overrides. Set the `APP_ENV` environment variable and the system will also load `apps/metaphor/config/application-{APP_ENV}.yml`, merging it on top of the base configuration. If no config file is found, the built-in defaults are used.
+Configuration supports environment-specific overrides. Set the `APP_ENV` environment variable and the system will also load `<app_dir>/config/application-{APP_ENV}.yml`, merging it on top of the base configuration. If no config file is found, the built-in defaults are used.
 
 ---
 
@@ -289,8 +294,9 @@ Configuration supports environment-specific overrides. Set the `APP_ENV` environ
 
 ### Server fails to start in local mode
 
-- Verify that `apps/metaphor/` exists and contains a valid Cargo project with a `metaphor-app` binary target.
-- Ensure the required environment variables (`APP_ENV`, `DATABASE_URL`) are set or that the defaults are acceptable.
+- Verify that the resolved app directory (from `metaphor.yaml` or the nearest Cargo crate above the CWD) exists and contains a valid `Cargo.toml` with a bin target.
+- If `metaphor.yaml` lists more than one `backend-service` project, `cd` into the one you want or invoke the command from inside its `path`.
+- Ensure `DATABASE_URL` (and any other required environment variables) are set in your shell or in `<app_dir>/config/application.yml`; the plugin no longer injects a default.
 
 ### Docker mode fails immediately
 

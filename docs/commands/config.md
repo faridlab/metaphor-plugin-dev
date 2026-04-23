@@ -23,7 +23,7 @@ metaphor-dev config validate [OPTIONS]
 Performs a three-phase validation of the application configuration:
 
 1. **Phase 1: `.env` file validation** — Checks the `.env` file for common issues
-2. **Phase 2: YAML config file validation** — Checks `apps/metaphor/config/application.yml` and environment-specific overlays
+2. **Phase 2: YAML config file validation** — Checks `<app_dir>/config/application.yml` and environment-specific overlays for the resolved backend-service project
 3. **Phase 3: Environment variable validation** — Checks loaded environment variables for correctness
 
 Each issue is reported with a severity level and optional suggestion for resolution.
@@ -58,8 +58,10 @@ The validator reads `.env` line by line and checks for:
 ### Phase 2: YAML Config Checks
 
 Validates YAML configuration files at:
-- `apps/metaphor/config/application.yml`
-- `apps/metaphor/config/application-{env}.yml` (if exists)
+- `<app_dir>/config/application.yml`
+- `<app_dir>/config/application-{env}.yml` (if exists)
+
+`<app_dir>` is the path of the backend-service project resolved from `metaphor.yaml` (or `./config/application.yml` as a fallback when no `metaphor.yaml` is found).
 
 | Check | Severity | Description |
 |-------|----------|-------------|
