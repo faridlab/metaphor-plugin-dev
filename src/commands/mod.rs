@@ -1,5 +1,6 @@
 pub mod config;
 pub mod deploy;
+pub mod deploy_history;
 pub mod dev;
 pub mod docker;
 pub mod docs;
