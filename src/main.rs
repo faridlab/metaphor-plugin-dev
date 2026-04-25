@@ -1,7 +1,7 @@
 //! Metaphor Dev Plugin — development workflow commands.
 //!
 //! Binary: `metaphor-dev`
-//! Commands: dev, lint, test, docs, config, jobs
+//! Commands: dev, lint, test, docs, config, jobs, docker, deploy
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -9,7 +9,9 @@ use colored::*;
 
 use metaphor_dev::commands::{
     config::ConfigAction,
+    deploy::DeployAction,
     dev::DevAction,
+    docker::DockerAction,
     docs::DocsAction,
     jobs::JobsAction,
     lint::LintAction,
@@ -68,6 +70,18 @@ enum Command {
         #[command(subcommand)]
         action: JobsAction,
     },
+
+    /// Local docker compose lifecycle (reads metaphor.deploy.yaml).
+    Docker {
+        #[command(subcommand)]
+        action: DockerAction,
+    },
+
+    /// Remote deployment: build, push, roll out, roll back.
+    Deploy {
+        #[command(subcommand)]
+        action: DeployAction,
+    },
 }
 
 #[tokio::main]
@@ -89,5 +103,7 @@ async fn main() -> Result<()> {
         Command::Docs { action } => metaphor_dev::commands::docs::handle_command(action).await,
         Command::Config { action } => metaphor_dev::commands::config::handle_config_command(action).await,
         Command::Jobs { action } => metaphor_dev::commands::jobs::handle_jobs_command(action).await,
+        Command::Docker { action } => metaphor_dev::commands::docker::handle_command(action).await,
+        Command::Deploy { action } => metaphor_dev::commands::deploy::handle_command(action).await,
     }
 }
