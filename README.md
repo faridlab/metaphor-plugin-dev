@@ -1,12 +1,12 @@
 # metaphor-plugin-dev
 
-> Development workflow plugin for Metaphor CLI (dev, lint, test, docs, config, jobs)
+> Development workflow plugin for Metaphor CLI (dev, lint, test, docs, config, jobs, docker, deploy)
 
-[![Version](https://img.shields.io/badge/version-0.1.2-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 
-A comprehensive development toolkit for the [Metaphor Framework](https://github.com/faridlab/metaphor-plugin-dev) — a modular monolith architecture built with Rust. This plugin provides commands for local development, code quality enforcement, test generation, documentation, configuration validation, and job scheduling.
+A comprehensive development toolkit for the [Metaphor Framework](https://github.com/faridlab/metaphor-plugin-dev) — a modular monolith architecture built with Rust. This plugin provides commands for local development, code quality enforcement, test generation, documentation, configuration validation, job scheduling, local docker compose lifecycle, and remote deployment.
 
 ## Installation
 
@@ -43,6 +43,12 @@ metaphor-dev dev test --coverage
 
 # Validate configuration
 metaphor-dev config validate
+
+# Bring up the local docker compose stack
+metaphor-dev docker up --env dev
+
+# Push a release to a remote environment
+metaphor-dev deploy push uat
 ```
 
 ### Project discovery
@@ -96,6 +102,20 @@ Configuration is loaded from `<app_dir>/config/application.yml`, and `cargo run 
 | `jobs config` | Generate job scheduler configuration |
 | `jobs example` | Create job example files |
 | `jobs init` | Initialize jobs module in current project |
+| **docker** *(reads `metaphor.deploy.yaml`)* | |
+| `docker up [--env <name>]` | Start the local compose stack (`docker compose up -d`) |
+| `docker down [--env <name>] [--volumes]` | Stop and remove the stack |
+| `docker logs [--env <name>] [--follow]` | Tail compose logs |
+| `docker ps [--env <name>]` | Show running containers |
+| `docker restart --service <name>` | Restart a single service |
+| `docker pull [--service <name>]` | Pull images defined in compose |
+| `docker build [--push] [--service <name>]` | Build images defined in compose |
+| **deploy** *(reads `metaphor.deploy.yaml`)* | |
+| `deploy push <env>` | Build, push to registry, and roll out to remote env |
+| `deploy rollback <env> --to <tag>` | Roll back remote env to a registry tag |
+| `deploy status <env>` | `docker compose ps` over SSH |
+| `deploy logs <env> [--follow]` | `docker compose logs` over SSH |
+| `deploy migrate <env>` | Run database migrations against the remote env |
 
 ## Global Options
 
@@ -120,7 +140,10 @@ Configuration is loaded from `<app_dir>/config/application.yml`, and `cargo run 
 | `cargo-outdated` | `lint outdated` | Dependency freshness checking |
 | `cargo-llvm-cov` | `test coverage` | Code coverage reports |
 | `cargo-watch` | `test watch` | File-watching test runner |
-| Docker / Docker Compose | `dev serve --docker` | Container-based development |
+| Docker / Docker Compose | `dev serve --docker`, all `docker *` commands | Container-based development |
+| `docker buildx` | `deploy push`, `docker build --push` | Multi-platform image builds + registry push |
+| `ssh`, `scp` | all `deploy *` commands | Remote command execution and env file transport |
+| `git` | `deploy push` (default tag derivation) | Resolve short SHA when `--tag` is omitted |
 | `miniserve` or Python 3 | `docs serve` | Local documentation server |
 | `protoc` | `docs api` | Protocol Buffer compiler |
 
@@ -136,6 +159,8 @@ Detailed documentation for each command category:
 - [docs](docs/commands/docs.md) — Documentation generation
 - [config](docs/commands/config.md) — Configuration validation
 - [jobs](docs/commands/jobs.md) — Job scheduling commands
+- [docker](docs/commands/docker.md) — Local docker compose lifecycle
+- [deploy](docs/commands/deploy.md) — Remote deployment (build, push, roll out, roll back)
 
 ### Guides
 
@@ -164,6 +189,7 @@ metaphor-plugin-dev/
     ├── main.rs             # CLI entry point and command dispatch
     ├── lib.rs              # Library entry point
     ├── project.rs          # Workspace/app discovery via metaphor.yaml + Cargo.toml
+    ├── deploy_config.rs    # Loader for metaphor.deploy.yaml (used by docker + deploy)
     ├── commands/
     │   ├── mod.rs           # Command module exports
     │   ├── dev.rs           # Development workflow commands
@@ -171,7 +197,9 @@ metaphor-plugin-dev/
     │   ├── test.rs          # Test generation and management
     │   ├── docs.rs          # Documentation generation
     │   ├── config.rs        # Configuration validation
-    │   └── jobs.rs          # Job scheduling
+    │   ├── jobs.rs          # Job scheduling
+    │   ├── docker.rs        # Local docker compose lifecycle
+    │   └── deploy.rs        # Remote deployment (push, rollback, status, logs, migrate)
     └── templates/
         └── jobs/
             └── job.rs       # Job file template for code generation

@@ -161,8 +161,144 @@ Secret key for signing JSON Web Tokens.
 
 These defaults are defined in `DevConfig::default()` and can be overridden via `application.yml`.
 
+## `metaphor.deploy.yaml`
+
+Workspace-root config that drives [`docker`](../commands/docker.md) and [`deploy`](../commands/deploy.md). Lives next to `metaphor.yaml`. Loaded by walking up from the current directory until the file is found; the directory containing it is the **workspace root** for path resolution.
+
+Environments without `host:` are *local* (operated by `docker`). Environments with `host:` are *remote* (operated by `deploy`).
+
+```yaml
+version: 1
+
+defaults:
+  registry: ghcr.io/your-org             # default registry for pushed images
+  compose_file: deployment/compose.yaml  # default compose file (rel. to workspace or deploy_dir)
+  ssh_user: deploy                       # default SSH user for remote envs
+  deploy_dir: /srv/app                   # default working dir on remote hosts
+  migrate_command: "metaphor migration run-all"
+
+environments:
+  dev:                                   # local — no host:
+    env_file: deployment/.env.dev
+    images:
+      api:
+        context: apps/api
+        tag_env: SERVICE_TAG
+
+  uat:                                   # remote
+    host: uat.example.com
+    env_file: deployment/.env.uat
+    images:
+      api:
+        context: apps/api
+        tag_env: SERVICE_TAG
+
+  prod:
+    host: example.com
+    env_file: deployment/.env.prod
+    require_confirm: true                # prompts before push/rollback unless --yes
+    images:
+      api:
+        context: apps/api
+        tag_env: SERVICE_TAG
+        build_args:
+          BUILD_PROFILE: release
+```
+
+### Top-level fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `version` | u32 | yes | Schema version. Currently `1`. |
+| `defaults` | object | no | Per-key fallbacks consumed by every environment. See below. |
+| `environments` | map<string, [Environment](#environment-fields)> | yes | At least one entry. Map key is the env name passed to commands. |
+
+### `defaults` fields
+
+| Field | Type | Used for | Description |
+|-------|------|----------|-------------|
+| `registry` | string | `deploy push` | Image registry prefix (e.g. `ghcr.io/myorg`). Falls back from per-image → per-env → defaults. |
+| `compose_file` | string | `docker`, `deploy` | Compose file path. Falls back from per-env → defaults → `deployment/compose.yaml`. |
+| `ssh_user` | string | `deploy` | SSH user concatenated as `<user>@<host>`. Falls back from per-env → defaults. |
+| `deploy_dir` | string | `deploy` | Remote working directory. Falls back from per-env → defaults. Required (no implicit default) when invoking `deploy`. |
+| `migrate_command` | string | `deploy push`, `deploy migrate` | Command run inside `docker compose run --rm migrations`. Defaults to `metaphor migration run-all`. |
+
+### Environment fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `host` | string | only for remote | Hostname/IP. **Presence marks the env as remote.** |
+| `ssh_user` | string | no | Per-env override for `defaults.ssh_user`. |
+| `deploy_dir` | string | no | Per-env override for `defaults.deploy_dir`. |
+| `compose_file` | string | no | Per-env override for `defaults.compose_file`. Resolved against the workspace root (locally) or `deploy_dir` (remotely). |
+| `env_file` | string | no | Per-env path. Defaults to `.env.<env>`. Resolved against the workspace root locally and `deploy_dir` remotely. |
+| `registry` | string | no | Per-env override for `defaults.registry`. |
+| `require_confirm` | bool | no | If `true`, `deploy push` and `deploy rollback` prompt for confirmation unless `--yes` is given. Defaults to `false`. |
+| `images` | map<string, [Image](#image-fields)> | yes for `deploy push`/`docker build` paths that consult it | Image build specs, keyed by image name. |
+
+### Image fields
+
+| Field | Type | Required | Description |
+|-------|------|----------|-------------|
+| `context` | string | yes | Docker build context, relative to workspace root. |
+| `dockerfile` | string | no | Dockerfile path relative to `context`. |
+| `name` | string | no | Image name (without registry/tag). Defaults to the map key. |
+| `registry` | string | no | Per-image override for env / defaults registry. |
+| `tag_env` | string | no | Env-file variable that tracks this image's tag (e.g. `SERVICE_TAG`). `deploy push` rewrites this on every release. |
+| `build_args` | map<string,string> | no | `--build-arg` pairs forwarded to `docker buildx build`. |
+| `push` | bool | no | Push after build. Defaults to `true` for images under remote envs. |
+
+### Path resolution
+
+| Path | Resolved relative to |
+|------|---------------------|
+| `compose_file` (local — `docker *`) | Workspace root (directory containing `metaphor.deploy.yaml`) |
+| `compose_file` (remote — `deploy *`) | `deploy_dir` on the remote host |
+| `env_file` (local) | Workspace root |
+| `env_file` (remote) | `deploy_dir` on the remote host |
+| `images.<key>.context` | Workspace root |
+| `images.<key>.dockerfile` | The image's `context` |
+
+### Example: minimal docker-only setup
+
+```yaml
+version: 1
+defaults:
+  compose_file: docker-compose.yml
+environments:
+  dev:
+    env_file: .env
+    images: {}
+```
+
+### Example: full beta deployment (single VPS)
+
+```yaml
+version: 1
+defaults:
+  registry: ghcr.io/myorg
+  compose_file: deployment/compose.yaml
+  ssh_user: deploy
+  deploy_dir: /srv/myapp
+environments:
+  dev:
+    env_file: deployment/.env.dev
+    images:
+      api:    { context: apps/api,    tag_env: API_TAG }
+      web:    { context: apps/web,    tag_env: WEB_TAG, build_args: { VITE_API_BASE_URL: "http://localhost:3000" } }
+  prod:
+    host: myapp.example.com
+    env_file: deployment/.env.prod
+    require_confirm: true
+    images:
+      api:    { context: apps/api,    tag_env: API_TAG }
+      web:    { context: apps/web,    tag_env: WEB_TAG, build_args: { VITE_API_BASE_URL: "https://api.myapp.example.com" } }
+```
+
 ## See Also
 
 - [config validate](../commands/config.md#config-validate) — Configuration validation command
 - [config email-verify](../commands/config.md#config-email-verify) — SMTP verification command
+- [docker](../commands/docker.md) — Local compose lifecycle driven by `metaphor.deploy.yaml`
+- [deploy](../commands/deploy.md) — Remote deployment driven by `metaphor.deploy.yaml`
 - [Getting Started](../guides/getting-started.md) — Initial setup
