@@ -13,7 +13,8 @@ The model is intentionally thin: each command is a deterministic combination of 
 | Subcommand | Description |
 |------------|-------------|
 | [`deploy push`](#deploy-push) | Build, push to registry, and roll out a release |
-| [`deploy rollback`](#deploy-rollback) | Roll back to a registry tag already pushed |
+| [`deploy rollback`](#deploy-rollback) | Roll back to a previous deploy (history-aware) |
+| [`deploy history`](#deploy-history) | Show deployment history for an environment |
 | [`deploy status`](#deploy-status) | `docker compose ps` over SSH |
 | [`deploy logs`](#deploy-logs) | `docker compose logs` over SSH |
 | [`deploy migrate`](#deploy-migrate) | Run database migrations against the remote env |
@@ -80,6 +81,7 @@ metaphor-dev deploy push <ENV> [OPTIONS]
 6. **`ssh`** to host and run `docker compose -f <compose> --env-file <env_file> pull`.
 7. **`ssh`** again and run `docker compose … up -d`.
 8. **Migrate** by running `docker compose run --rm migrations sh -lc "<migrate_command>"` on the remote host (skipped when `--skip-migrate`). The `<migrate_command>` defaults to `metaphor migration run-all` and can be overridden by `defaults.migrate_command`.
+9. **Record history** by appending a JSONL entry to `deployment/history/<env>.jsonl`, snapshotting the env file under `deployment/history/snapshots/`, and mirroring both to `<deploy_dir>/history/` on the remote host. A failed push still gets recorded (with `status: failed` and a short error) so [`deploy rollback`](#deploy-rollback) can step over it.
 
 ### Examples
 
@@ -117,12 +119,12 @@ metaphor-dev deploy push prod --tag $GITHUB_SHA --yes
 
 ## deploy rollback
 
-Roll a remote environment back to a tag already in the registry.
+Roll a remote environment back to a previous deploy. Reads `deployment/history/<env>.jsonl` to figure out where to roll back to — no need to look up SHAs by hand. Pass `--to <tag>` for an explicit tag override.
 
 ### Synopsis
 
 ```
-metaphor-dev deploy rollback <ENV> --to <TAG> [-y]
+metaphor-dev deploy rollback <ENV> [--steps N | --to TAG] [-y]
 ```
 
 ### Arguments
@@ -135,17 +137,109 @@ metaphor-dev deploy rollback <ENV> --to <TAG> [-y]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--to` | string | required | Tag to roll back to |
+| `--steps` | int | `1` | Number of successful pushes to step back from current. `1` = the deploy before this one. Mutually exclusive with `--to`. |
+| `--to` | string | none | Roll back to this exact tag. Bypasses history. Mutually exclusive with `--steps`. |
 | `-y`, `--yes` | bool | `false` | Skip confirmation for `require_confirm` envs |
 
 ### Behavior
 
-Identical to `push` from step 4 onward — there is no implicit "previous tag" memory; the operator must specify `--to`.
+1. Read `deployment/history/<env>.jsonl`.
+2. Resolve the target:
+   - `--steps N`: walk back `N` successful pushes from the most recent one. Failed pushes and rollbacks are skipped so step counts always refer to "deploys that actually shipped".
+   - `--to <tag>`: use this exact tag for every image with a `tag_env`; assume the registry has it.
+3. Confirm if `require_confirm: true` and `--yes` was not passed.
+4. Update the local env file with the target tags, `scp` to the remote host, `docker compose pull && up -d`.
+5. Append a `rollback` record to `deployment/history/<env>.jsonl` and mirror it to the remote host.
 
 ### Examples
 
+Roll back to the previous successful deploy (most common):
+
+```sh
+metaphor-dev deploy rollback prod
+```
+
+Roll back two pushes:
+
+```sh
+metaphor-dev deploy rollback prod --steps 2
+```
+
+Explicit tag (e.g. promoting a known-good UAT image straight to prod):
+
 ```sh
 metaphor-dev deploy rollback prod --to abc1234 --yes
+```
+
+### Errors
+
+- `no deployment/history/<env>.jsonl yet` — there's no recorded deploy to step back from. Use `--to <tag>` instead.
+- `step N resolves to the currently-deployed tag` — the step count points at the same tag that's already live; nothing to do.
+
+### Notes
+
+- Rollback is **image-only**. Database migrations are not auto-reverted; schema rollbacks must be forward-fix migrations.
+- If the historical record had per-image tags (e.g. a frontend was pushed independently), they're restored individually.
+
+---
+
+## deploy history
+
+Show recent deployments for an environment.
+
+### Synopsis
+
+```
+metaphor-dev deploy history <ENV> [OPTIONS]
+```
+
+### Options
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--limit` | int | `20` | Most recent N records to show |
+| `--remote` | bool | `false` | Read from `<deploy_dir>/history/<env>.jsonl` over SSH instead of the local workspace file |
+| `--json` | bool | `false` | Emit raw JSON array (newest first) for scripting |
+
+### Output
+
+Default text view (newest first):
+
+```
+TIMESTAMP (UTC)       ACTION    TAG         OK   DEPLOYER
+2026-04-25 14:02:00   push      abc1234     ✓    farid@laptop
+2026-04-25 11:30:00   rollback  def5678     ✓    farid@laptop
+2026-04-25 09:15:00   push      def5678     ✗    farid@laptop
+    error: ssh exited 255: Connection refused
+2026-04-24 16:45:00   push      def5678     ✓    farid@laptop
+```
+
+### Storage
+
+Records are appended JSONL at `deployment/history/<env>.jsonl` in the workspace and (best-effort) mirrored to `<deploy_dir>/history/<env>.jsonl` on the remote host. Each record carries: timestamp, action (`push`/`rollback`), status (`success`/`failed`), tag, per-image tag map, deployer (`$USER@$HOSTNAME`), optional snapshot reference, optional rollback source tag, and a short error if the action failed.
+
+Snapshots of the env file used for each successful deploy are written to `deployment/history/snapshots/.env.<env>.<timestamp>-<sha>` for audit / future replay. They are referenced by basename in the JSONL but not auto-pruned — the file is intended to be a permanent record.
+
+History is never auto-pruned by the CLI. The local file should be committed to git so it survives laptop loss; the remote mirror is for ops convenience.
+
+### Examples
+
+Last 20 deploys (workspace history):
+
+```sh
+metaphor-dev deploy history prod
+```
+
+Last 5, in JSON for scripting:
+
+```sh
+metaphor-dev deploy history prod --limit 5 --json
+```
+
+Read directly from the production host (handy when on-call without checkout):
+
+```sh
+metaphor-dev deploy history prod --remote
 ```
 
 ---
