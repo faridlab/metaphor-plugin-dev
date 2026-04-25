@@ -21,6 +21,9 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use crate::deploy_config::{self, EnvironmentSpec, ImageSpec, Resolved};
+use std::collections::BTreeMap;
+
+use super::deploy_history::{self, HistoryRecord};
 
 #[derive(Subcommand)]
 pub enum DeployAction {
@@ -55,15 +58,39 @@ pub enum DeployAction {
     },
 
     /// Roll back to a previous tag already in the registry.
+    ///
+    /// With no flags, rolls back to the previous successful push recorded in
+    /// `deployment/history/<env>.jsonl`. Failed pushes and rollbacks are skipped
+    /// so `--steps 1` always means "the deploy that was deployed before this one".
     Rollback {
         env: String,
 
-        /// Tag to roll back to. Required — there is no implicit previous-tag memory.
-        #[arg(long = "to")]
-        to: String,
+        /// Roll back to this exact tag. Bypasses history.
+        #[arg(long = "to", conflicts_with = "steps")]
+        to: Option<String>,
+
+        /// Number of successful pushes to step back from current. Default: 1.
+        #[arg(long, conflicts_with = "to", default_value = "1")]
+        steps: usize,
 
         #[arg(long, short)]
         yes: bool,
+    },
+
+    /// Show deployment history for an environment.
+    History {
+        env: String,
+
+        /// Maximum number of records to show.
+        #[arg(long, default_value = "20")]
+        limit: usize,
+
+        /// Read history from the remote host instead of the local workspace.
+        #[arg(long)]
+        remote: bool,
+
+        #[arg(long)]
+        json: bool,
     },
 
     /// `docker compose ps` over SSH.
@@ -139,10 +166,20 @@ pub async fn handle_command(action: &DeployAction) -> Result<()> {
             };
             push(&resolved, env, env_spec, &opts)
         }
-        DeployAction::Rollback { env, to, yes } => {
+        DeployAction::Rollback { env, to, steps, yes } => {
             let env_spec = require_remote(&resolved, env)?;
-            rollback(&resolved, env, env_spec, to, *yes)
+            let target = match to {
+                Some(t) => RollbackTarget::Tag(t.clone()),
+                None => RollbackTarget::Steps(*steps),
+            };
+            rollback(&resolved, env, env_spec, target, *yes)
         }
+        DeployAction::History {
+            env,
+            limit,
+            remote,
+            json,
+        } => history(&resolved, env, *limit, *remote, *json),
         DeployAction::Status { env } => {
             let env_spec = require_remote(&resolved, env)?;
             remote_compose(&resolved, env, env_spec, &["ps".into()])
@@ -217,37 +254,81 @@ fn push(
         ))?;
     }
 
+    let inner = push_inner(resolved, env_name, env, opts, &tag);
+
+    // History epilogue (skipped on dry-run; that's a preview, not a real deploy).
+    if !opts.dry_run {
+        let image_tags = uniform_image_tags(env, &tag);
+        let record = match &inner {
+            Ok(snapshot) => HistoryRecord::new_push(tag.clone(), image_tags, snapshot.clone()),
+            Err(e) => HistoryRecord::new_push(tag.clone(), image_tags, None)
+                .with_failure(&e.to_string()),
+        };
+        if let Err(e) = deploy_history::append_record(&resolved.workspace_root, env_name, &record) {
+            eprintln!("{} failed to record history: {e}", "warning:".yellow().bold());
+        }
+        if matches!(record.status, deploy_history::Status::Success) {
+            mirror_history_to_remote(resolved, env_name, env, &record);
+        }
+    }
+
+    inner.map(|_| {
+        println!(
+            "\n{} deployed tag {} to {}",
+            "✓".green().bold(),
+            tag.bright_cyan(),
+            env_name.bright_cyan()
+        );
+    })
+}
+
+/// The actual push body. Returns `Ok(Some(snapshot_basename))` on success when
+/// a snapshot was written, `Ok(None)` for a successful push that didn't write
+/// one (dry-run, `--skip-env-update`).
+fn push_inner(
+    resolved: &Resolved,
+    env_name: &str,
+    env: &EnvironmentSpec,
+    opts: &PushOptions,
+    tag: &str,
+) -> Result<Option<String>> {
     // 1. Build & push images
     if opts.skip_build {
         println!("{} skipping build (per --skip-build)", "●".yellow());
     } else {
         for (name, image) in &env.images {
-            build_and_push(resolved, env, image, name, &tag, opts.dry_run)?;
+            build_and_push(resolved, env, image, name, tag, opts.dry_run)?;
         }
     }
 
     // 2. Update env file tags locally
     if !opts.skip_env_update {
         let env_file = resolved.local_env_file(env, env_name);
-        update_env_file_tags(&env_file, &env.images, &tag, opts.dry_run)?;
+        update_env_file_tags(&env_file, &env.images, tag, opts.dry_run)?;
     }
 
-    // 3. scp env file to remote
+    // 3. Snapshot the env file (after tag update) for audit/rollback.
+    let snapshot = if opts.dry_run || opts.skip_env_update {
+        None
+    } else {
+        snapshot_env_file(resolved, env, env_name, tag).ok()
+    };
+
+    // 4. scp env file to remote
     scp_env_file(resolved, env, env_name, opts.dry_run)?;
 
-    // 4. Remote compose pull + up
+    // 5. Remote compose pull + up
     remote_compose_action(resolved, env_name, env, "pull", &[], opts.dry_run)?;
     remote_compose_action(resolved, env_name, env, "up", &["-d".into()], opts.dry_run)?;
 
-    // 5. Optional migrations
+    // 6. Optional migrations
     if !opts.skip_migrate {
         migrate(resolved, env_name, env, opts.dry_run)?;
     } else {
         println!("{} skipping migrations (per --skip-migrate)", "●".yellow());
     }
 
-    println!("\n{} deployed tag {} to {}", "✓".green().bold(), tag.bright_cyan(), env_name.bright_cyan());
-    Ok(())
+    Ok(snapshot)
 }
 
 fn build_and_push(
@@ -477,33 +558,87 @@ fn default_env_name<'a>(resolved: &'a Resolved, env: &'a EnvironmentSpec) -> &'a
 
 // ────────────────────────────── rollback ──────────────────────────────
 
+enum RollbackTarget {
+    Steps(usize),
+    Tag(String),
+}
+
 fn rollback(
     resolved: &Resolved,
     env_name: &str,
     env: &EnvironmentSpec,
-    to: &str,
+    target: RollbackTarget,
     yes: bool,
 ) -> Result<()> {
+    let records = deploy_history::read_records(&resolved.workspace_root, env_name)
+        .unwrap_or_default();
+    let from_tag =
+        deploy_history::current_deployed_tag(&records).unwrap_or_else(|| "(unknown)".to_string());
+
+    let (to_tag, image_tags, source_label) = match &target {
+        RollbackTarget::Steps(n) => {
+            if records.is_empty() {
+                bail!(
+                    "no deployment/history/{}.jsonl yet — nothing to roll back to. Pass --to <sha> for an explicit rollback.",
+                    env_name
+                );
+            }
+            // Step 0 is current deploy; step 1 is the one before. The user passes the step
+            // count; we look up `n` (so --steps 1 → records[1] in success-only view).
+            let rec = deploy_history::find_previous_successful_push(&records, *n)
+                .ok_or_else(|| {
+                    anyhow!(
+                        "no successful push {} step(s) back in deployment/history/{}.jsonl",
+                        n,
+                        env_name
+                    )
+                })?;
+            if rec.tag == from_tag {
+                bail!(
+                    "step {} resolves to the currently-deployed tag '{}'; nothing to do",
+                    n,
+                    rec.tag
+                );
+            }
+            (rec.tag.clone(), rec.image_tags.clone(), format!("{n} step(s) back"))
+        }
+        RollbackTarget::Tag(tag) => (
+            tag.clone(),
+            uniform_image_tags(env, tag),
+            format!("tag {tag}"),
+        ),
+    };
+
     if env.require_confirm && !yes {
         confirm(&format!(
-            "Roll back '{}' ({}) to tag '{}'?",
+            "Roll back '{}' ({}) from '{}' to '{}' ({})?",
             env_name,
             env.host.as_deref().unwrap_or("?"),
-            to
+            from_tag,
+            to_tag,
+            source_label
         ))?;
     }
 
     let env_file = resolved.local_env_file(env, env_name);
-    update_env_file_tags(&env_file, &env.images, to, false)?;
+    update_env_file_tags_from_map(&env_file, &env.images, &image_tags, &to_tag, false)?;
     scp_env_file(resolved, env, env_name, false)?;
     remote_compose_action(resolved, env_name, env, "pull", &[], false)?;
     remote_compose_action(resolved, env_name, env, "up", &["-d".into()], false)?;
 
+    let snapshot = snapshot_env_file(resolved, env, env_name, &to_tag).ok();
+    let record = HistoryRecord::new_rollback(from_tag, to_tag.clone(), image_tags, snapshot);
+    if let Err(e) = deploy_history::append_record(&resolved.workspace_root, env_name, &record) {
+        eprintln!("{} failed to record history: {e}", "warning:".yellow().bold());
+    }
+    mirror_history_to_remote(resolved, env_name, env, &record);
+
     println!(
-        "\n{} rolled '{}' back to {}",
+        "\n{} rolled '{}' back to {} ({})",
         "✓".green().bold(),
         env_name.bright_cyan(),
-        to.bright_cyan()
+        to_tag.bright_cyan(),
+        source_label
     );
     Ok(())
 }
@@ -640,6 +775,207 @@ fn print_header(env_name: &str, env: &EnvironmentSpec, tag: &str) {
 
 #[allow(dead_code)]
 fn _unused(_: PathBuf) {} // keep PathBuf import if future edits need it
+
+// ────────────────────────────── history support ──────────────────────────────
+
+/// Build the per-image tag map for a uniform-tag deploy (every image gets the same tag).
+fn uniform_image_tags(env: &EnvironmentSpec, tag: &str) -> BTreeMap<String, String> {
+    env.images
+        .keys()
+        .map(|k| (k.clone(), tag.to_string()))
+        .collect()
+}
+
+/// Read the env file currently on disk and write a snapshot copy under
+/// `deployment/history/snapshots/`. Returns the snapshot basename.
+fn snapshot_env_file(
+    resolved: &Resolved,
+    env: &EnvironmentSpec,
+    env_name: &str,
+    tag: &str,
+) -> Result<String> {
+    let env_file = resolved.local_env_file(env, env_name);
+    let content = std::fs::read_to_string(&env_file)
+        .with_context(|| format!("reading {} for snapshot", env_file.display()))?;
+    deploy_history::write_snapshot(&resolved.workspace_root, env_name, &content, tag)
+}
+
+/// Like `update_env_file_tags`, but pulls each image's tag from a per-image map.
+/// Falls back to `default_tag` for images not present in the map.
+fn update_env_file_tags_from_map(
+    env_file: &Path,
+    images: &BTreeMap<String, ImageSpec>,
+    image_tags: &BTreeMap<String, String>,
+    default_tag: &str,
+    dry_run: bool,
+) -> Result<()> {
+    if !env_file.is_file() {
+        eprintln!(
+            "{} env file {} does not exist; creating a minimal one",
+            "warning:".yellow().bold(),
+            env_file.display()
+        );
+        if !dry_run {
+            if let Some(parent) = env_file.parent() {
+                std::fs::create_dir_all(parent).ok();
+            }
+            std::fs::write(env_file, "")
+                .with_context(|| format!("writing {}", env_file.display()))?;
+        }
+    }
+
+    let mut content = std::fs::read_to_string(env_file)
+        .with_context(|| format!("reading {}", env_file.display()))?;
+
+    for (image_key, image) in images.iter() {
+        let Some(var) = &image.tag_env else { continue };
+        let value = image_tags
+            .get(image_key)
+            .map(|s| s.as_str())
+            .unwrap_or(default_tag);
+        content = replace_or_append_kv(&content, var, value);
+    }
+
+    println!(
+        "{} update tags in {}",
+        "env".bright_blue().bold(),
+        env_file.display()
+    );
+
+    if dry_run {
+        println!("{} (dry-run: not writing)", "  ●".bright_black());
+        return Ok(());
+    }
+    std::fs::write(env_file, content)
+        .with_context(|| format!("writing {}", env_file.display()))?;
+    Ok(())
+}
+
+/// Best-effort copy the local history JSONL and (if any) the matching snapshot
+/// to the remote host. Failures are logged as warnings; the local file remains
+/// the source of truth.
+fn mirror_history_to_remote(
+    resolved: &Resolved,
+    env_name: &str,
+    env: &EnvironmentSpec,
+    record: &HistoryRecord,
+) {
+    if env.host.is_none() {
+        return;
+    }
+    if let Err(e) = mirror_history_inner(resolved, env_name, env, record) {
+        eprintln!(
+            "{} failed to mirror history to remote: {e}",
+            "warning:".yellow().bold()
+        );
+    }
+}
+
+fn mirror_history_inner(
+    resolved: &Resolved,
+    env_name: &str,
+    env: &EnvironmentSpec,
+    record: &HistoryRecord,
+) -> Result<()> {
+    let ssh = ssh_target(resolved, env)?;
+    let deploy_dir = resolved.deploy_dir(env)?;
+    let remote_history_dir = format!("{deploy_dir}/history");
+    let remote_snapshots_dir = format!("{remote_history_dir}/snapshots");
+
+    // Make sure remote dirs exist (combined into one mkdir to keep it cheap).
+    let mkdir_cmd = format!(
+        "mkdir -p {} {}",
+        shell_quote(&remote_history_dir),
+        shell_quote(&remote_snapshots_dir)
+    );
+    let status = Command::new("ssh").arg(&ssh).arg(&mkdir_cmd).status()?;
+    if !status.success() {
+        bail!("ssh mkdir exited {status}");
+    }
+
+    // Whole-file scp of JSONL — small (one record per push, KB-scale).
+    let local_jsonl = deploy_history::history_file(&resolved.workspace_root, env_name);
+    if local_jsonl.is_file() {
+        let dest = format!("{ssh}:{remote_history_dir}/{env_name}.jsonl");
+        let status = Command::new("scp").arg(&local_jsonl).arg(&dest).status()?;
+        if !status.success() {
+            bail!("scp jsonl exited {status}");
+        }
+    }
+
+    // scp the snapshot for this record, if present.
+    if let Some(snap) = &record.snapshot {
+        let local_snap = deploy_history::snapshots_dir(&resolved.workspace_root).join(snap);
+        if local_snap.is_file() {
+            let dest = format!("{ssh}:{remote_snapshots_dir}/{snap}");
+            let status = Command::new("scp").arg(&local_snap).arg(&dest).status()?;
+            if !status.success() {
+                bail!("scp snapshot exited {status}");
+            }
+        }
+    }
+    Ok(())
+}
+
+// ────────────────────────────── history subcommand ──────────────────────────────
+
+fn history(
+    resolved: &Resolved,
+    env_name: &str,
+    limit: usize,
+    remote: bool,
+    json: bool,
+) -> Result<()> {
+    let raw = if remote {
+        let env_spec = require_remote(resolved, env_name)?;
+        read_remote_history(resolved, env_spec, env_name)?
+    } else {
+        let path = deploy_history::history_file(&resolved.workspace_root, env_name);
+        if path.is_file() {
+            std::fs::read_to_string(&path)
+                .with_context(|| format!("reading {}", path.display()))?
+        } else {
+            String::new()
+        }
+    };
+
+    let path_for_errors =
+        deploy_history::history_file(&resolved.workspace_root, env_name);
+    let records = deploy_history::parse_jsonl(&raw, &path_for_errors)?;
+
+    if json {
+        // newest first
+        let view: Vec<&HistoryRecord> = records.iter().rev().take(limit).collect();
+        println!("{}", serde_json::to_string_pretty(&view)?);
+    } else {
+        print!("{}", deploy_history::render_table(&records, Some(limit)));
+    }
+    Ok(())
+}
+
+fn read_remote_history(
+    resolved: &Resolved,
+    env: &EnvironmentSpec,
+    env_name: &str,
+) -> Result<String> {
+    let ssh = ssh_target(resolved, env)?;
+    let deploy_dir = resolved.deploy_dir(env)?;
+    let path = format!("{deploy_dir}/history/{env_name}.jsonl");
+    let cmd = format!("test -f {p} && cat {p} || true", p = shell_quote(&path));
+    let output = Command::new("ssh")
+        .arg(&ssh)
+        .arg(&cmd)
+        .output()
+        .context("running ssh + cat for remote history")?;
+    if !output.status.success() {
+        bail!(
+            "ssh exited {}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    Ok(String::from_utf8(output.stdout).context("remote history not utf-8")?)
+}
 
 // ────────────────────────────── exec (legacy infra-project) ──────────────────────────────
 
