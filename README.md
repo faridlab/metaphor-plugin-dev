@@ -2,7 +2,7 @@
 
 > Development workflow plugin for Metaphor CLI (dev, lint, test, docs, config, jobs, docker, deploy)
 
-[![Version](https://img.shields.io/badge/version-0.1.3-blue.svg)](Cargo.toml)
+[![Version](https://img.shields.io/badge/version-0.1.7-blue.svg)](Cargo.toml)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 [![Rust](https://img.shields.io/badge/rust-2021-orange.svg)](https://www.rust-lang.org/)
 
@@ -116,6 +116,9 @@ Configuration is loaded from `<app_dir>/config/application.yml`, and `cargo run 
 | `deploy status <env>` | `docker compose ps` over SSH |
 | `deploy logs <env> [--follow]` | `docker compose logs` over SSH |
 | `deploy migrate <env>` | Run database migrations against the remote env |
+| `deploy service <env> <svc> <tag>` | Deploy ONE pre-built service from the registry (no build/migrate); records history |
+| `deploy bump <env> --service <svc> --tag <tag>` | Bump a service's `*_TAG` in the LOCAL env file only (no SSH, no deploy) |
+| `deploy preflight <env>` | Validate local prod env files (contract vars + `docker compose config`) before a push |
 
 ## Global Options
 

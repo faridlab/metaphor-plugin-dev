@@ -13,6 +13,9 @@ The model is intentionally thin: each command is a deterministic combination of 
 | Subcommand | Description |
 |------------|-------------|
 | [`deploy push`](#deploy-push) | Build, push to registry, and roll out a release |
+| [`deploy service`](#deploy-service) | Deploy ONE pre-built service from the registry (no build/migrate) |
+| [`deploy bump`](#deploy-bump) | Bump a service's `*_TAG` in the LOCAL env file only (no SSH, no deploy) |
+| [`deploy preflight`](#deploy-preflight) | Validate local prod env files before a push (no SSH) |
 | [`deploy rollback`](#deploy-rollback) | Roll back to a previous deploy (history-aware) |
 | [`deploy history`](#deploy-history) | Show deployment history for an environment |
 | [`deploy status`](#deploy-status) | `docker compose ps` over SSH |
@@ -114,6 +117,152 @@ Non-interactive prod release (CI):
 ```sh
 metaphor-dev deploy push prod --tag $GITHUB_SHA --yes
 ```
+
+---
+
+## deploy service
+
+Deploy a **single** pre-built service from the registry, without building or migrating. Use it when CI (or a prior `deploy push`) has already pushed the image and you only need to roll that one service forward on the remote host. The image must already exist in the registry under `<tag>`.
+
+This is the history-aware successor to the legacy `deploy-service.sh`: unlike that script, every `deploy service` is recorded in [`deploy history`](#deploy-history).
+
+### Synopsis
+
+```
+metaphor-dev deploy service <ENV> <SERVICE> <TAG> [OPTIONS]
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `<ENV>` | Environment name from `metaphor.deploy.yaml` (must have `host:`) |
+| `<SERVICE>` | Service to deploy — a key under the env's `images` |
+| `<TAG>` | Image tag already present in the registry (e.g. `v0.1.2`) |
+
+### Options
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--dry-run` | bool | `false` | Print every command without executing |
+| `-y`, `--yes` | bool | `false` | Skip the confirmation prompt for environments with `require_confirm: true` |
+
+### What `service` does, step by step
+
+1. **Validate** that `<SERVICE>` is a key under `environments.<env>.images` (errors with the available names if not).
+2. **Confirm** if `require_confirm: true` and `--yes` was not passed.
+3. **Bump** only this service's `<tag_env>=<tag>` in the local env file. Errors if the selected image has no `tag_env` — an explicit selection means you asked for this service specifically.
+4. **Snapshot** the env file for audit/rollback.
+5. **`scp`** the local env file to the remote host.
+6. **Pull → up → ps**, scoped to just this service:
+   ```
+   docker compose … pull <service>
+   docker compose … up -d <service>
+   docker compose … ps  <service>
+   ```
+7. **Record history** — appends a `push` record (per-image tag map = just this service) to `deployment/history/<env>.jsonl` and mirrors it to the remote on success. A failure is still recorded with `status: failed`.
+
+`--dry-run` previews every command and writes nothing — no env-file edit, no snapshot, no history record.
+
+### Examples
+
+Roll the API service forward to a tag CI just pushed:
+
+```sh
+metaphor-dev deploy service prod api v0.1.2 --yes
+```
+
+Preview without touching anything:
+
+```sh
+metaphor-dev deploy service prod api v0.1.2 --dry-run
+```
+
+---
+
+## deploy bump
+
+Bump a service's `*_TAG` in the **local** env file only — no build, no SSH, no deploy. It stages the tag change so you can review the diff and commit before deploying. Pairs with a later [`deploy service`](#deploy-service) or [`deploy push`](#deploy-push).
+
+This is the successor to the legacy `bump-prod-tag.sh`, including its no-op detection: if the variable is already at the requested tag, it prints "No change" and exits.
+
+### Synopsis
+
+```
+metaphor-dev deploy bump <ENV> --service <SERVICE> --tag <TAG>
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `<ENV>` | Environment name from `metaphor.deploy.yaml` |
+
+### Options
+
+| Flag | Type | Required | Description |
+|------|------|----------|-------------|
+| `--service` | string | yes | Service whose tag var to bump — a key under the env's `images` |
+| `--tag` | string | yes | New tag value (e.g. `v0.1.2`) |
+
+### Behavior
+
+1. Resolve the service's `tag_env` (errors if it has none).
+2. If the env file already has `<tag_env>=<tag>`, report "No change" and exit successfully.
+3. Otherwise rewrite `<tag_env>=<tag>` in the local env file and print the next step.
+
+Unlike `deploy service`, `bump` never touches the remote host and writes no history record — it is a purely local edit. It works on local-only environments too (it does not require `host:`).
+
+### Examples
+
+Stage a tag bump for review:
+
+```sh
+metaphor-dev deploy bump prod --service api --tag v0.1.2
+# → review the diff, commit, then:
+metaphor-dev deploy service prod api v0.1.2
+```
+
+---
+
+## deploy preflight
+
+Validate the local prod env files **before** a push. Local-only — it makes no SSH connection. Run it as a fast gate in CI or before `deploy push` to catch missing/placeholder secrets before they reach the remote host.
+
+### Synopsis
+
+```
+metaphor-dev deploy preflight <ENV>
+```
+
+### Arguments
+
+| Argument | Description |
+|----------|-------------|
+| `<ENV>` | Environment name from `metaphor.deploy.yaml` |
+
+### Behavior
+
+Two layers, both must pass:
+
+1. **Per-service contract check.** For each image whose `<context>/.env.prod.example` exists, every `^[A-Z_]+=` variable declared there must be present, non-empty and non-placeholder in `<context>/.env.prod`. Images without a `.env.prod.example` (e.g. webapps) are auto-skipped. A value is a placeholder if it matches `CHANGE_ME`, `TODO`, `REPLACE_ME`, `FILL_…`, `XXX…`, or a `<…>` angle-bracket token.
+2. **Compose interpolation check.** Runs `docker compose -f <compose> --env-file <env> config` and fails if any `${VAR:?}` reference is unresolved.
+
+Exits non-zero on the first failing layer, listing each missing or placeholder variable.
+
+### Examples
+
+Gate a release:
+
+```sh
+metaphor-dev deploy preflight prod && metaphor-dev deploy push prod
+```
+
+### Errors
+
+- `<service>: runtime env file missing: <path>` — the image's `.env.prod` does not exist next to its `.env.prod.example`.
+- `[missing] <VAR>` / `[placeholder] <VAR>` — a contract variable is absent or still set to a placeholder.
+- `compose validation failed: unresolved ${VAR:?} refs in <env>` — `docker compose config` could not resolve a required interpolation.
 
 ---
 
