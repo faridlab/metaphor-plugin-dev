@@ -119,6 +119,59 @@ pub enum DeployAction {
         dry_run: bool,
     },
 
+    /// Deploy ONE pre-built service from the registry.
+    ///
+    /// Bumps the service's `*_TAG` in the env file, pulls + `up -d` only that
+    /// service on the remote, then shows its status. No build, no migrate —
+    /// the image must already be in the registry (e.g. just pushed by CI).
+    /// Records the deploy in history, unlike the old `deploy-service.sh`.
+    Service {
+        /// Environment name from metaphor.deploy.yaml.
+        env: String,
+
+        /// Service to deploy (a compose/image key under the env's `images`).
+        service: String,
+
+        /// Image tag already present in the registry (e.g. v0.1.2).
+        tag: String,
+
+        /// Print the commands that would run without executing them.
+        #[arg(long)]
+        dry_run: bool,
+
+        /// Proceed without interactive confirmation (required for `require_confirm` envs).
+        #[arg(long, short)]
+        yes: bool,
+    },
+
+    /// Bump a service's `*_TAG` in the LOCAL env file only — no build, no SSH,
+    /// no deploy. Pairs with a later `deploy service`/`push`; stages the change
+    /// so you can review the diff and commit before deploying.
+    Bump {
+        /// Environment name from metaphor.deploy.yaml.
+        env: String,
+
+        /// Service whose tag var to bump (a key under the env's `images`).
+        #[arg(long = "service", value_name = "SERVICE")]
+        service: String,
+
+        /// New tag value (e.g. v0.1.2).
+        #[arg(long)]
+        tag: String,
+    },
+
+    /// Validate local prod env files before a push (no SSH).
+    ///
+    /// 1. Per-service contract: every `^[A-Z_]+=` var in each image's
+    ///    `<context>/.env.prod.example` must be present, non-empty and
+    ///    non-placeholder in `<context>/.env.prod`.
+    /// 2. Compose interpolation: `docker compose -f <compose> --env-file <env>
+    ///    config` must resolve every `${VAR:?}` reference.
+    Preflight {
+        /// Environment name from metaphor.deploy.yaml.
+        env: String,
+    },
+
     /// Delegate to the workspace's infra project (./deploy.sh or `make deploy`).
     ///
     /// Migrated from the legacy `metaphor deploy` core command. Use this when
@@ -205,6 +258,24 @@ pub async fn handle_command(action: &DeployAction) -> Result<()> {
         DeployAction::Migrate { env, dry_run } => {
             let env_spec = require_remote(&resolved, env)?;
             migrate(&resolved, env, env_spec, *dry_run)
+        }
+        DeployAction::Service {
+            env,
+            service,
+            tag,
+            dry_run,
+            yes,
+        } => {
+            let env_spec = require_remote(&resolved, env)?;
+            deploy_service(&resolved, env, env_spec, service, tag, *dry_run, *yes)
+        }
+        DeployAction::Bump { env, service, tag } => {
+            let env_spec = resolved.environment(env)?;
+            bump(&resolved, env, env_spec, service, tag)
+        }
+        DeployAction::Preflight { env } => {
+            let env_spec = resolved.environment(env)?;
+            preflight(&resolved, env, env_spec)
         }
         DeployAction::Exec { .. } => unreachable!("Exec is handled before this match"),
     }
@@ -682,6 +753,351 @@ fn migrate(
     remote_compose_action(resolved, env_name, env, "run", &args, dry_run)
 }
 
+// ───────────────────── single-service deploy / bump / preflight ─────────────────────
+
+/// Return the subset of `env.images` selected by `services`.
+/// Empty selection = all images. Errors if a requested name is not an image key.
+fn select_images<'a>(
+    env: &'a EnvironmentSpec,
+    services: &[String],
+) -> Result<BTreeMap<&'a String, &'a ImageSpec>> {
+    if services.is_empty() {
+        return Ok(env.images.iter().collect());
+    }
+    let mut out = BTreeMap::new();
+    for s in services {
+        let (key, spec) = env.images.get_key_value(s).ok_or_else(|| {
+            let avail: Vec<&str> = env.images.keys().map(|k| k.as_str()).collect();
+            anyhow!(
+                "service '{}' not found in env images; available: {}",
+                s,
+                avail.join(", ")
+            )
+        })?;
+        out.insert(key, spec);
+    }
+    Ok(out)
+}
+
+/// Like `update_env_file_tags`, but only for the selected images, and STRICT:
+/// errors if a named image has no `tag_env`. (A full-sweep push silently skips
+/// those, but an explicit selection means the operator asked for this service.)
+fn update_env_file_tags_selected(
+    env_file: &Path,
+    selected: &BTreeMap<&String, &ImageSpec>,
+    tag: &str,
+    dry_run: bool,
+) -> Result<()> {
+    if !env_file.is_file() {
+        bail!("local env file not found at {}", env_file.display());
+    }
+    let mut content = std::fs::read_to_string(env_file)
+        .with_context(|| format!("reading {}", env_file.display()))?;
+
+    for (name, image) in selected {
+        let var = image.tag_env.as_deref().ok_or_else(|| {
+            anyhow!(
+                "service '{}' has no tag_env in metaphor.deploy.yaml; cannot set its tag",
+                name
+            )
+        })?;
+        content = replace_or_append_kv(&content, var, tag);
+    }
+
+    println!(
+        "{} update tags in {}",
+        "env".bright_blue().bold(),
+        env_file.display()
+    );
+    if dry_run {
+        println!("{} (dry-run: not writing)", "  ●".bright_black());
+        return Ok(());
+    }
+    std::fs::write(env_file, content).with_context(|| format!("writing {}", env_file.display()))?;
+    Ok(())
+}
+
+/// Deploy a single pre-built service: bump its tag, scp the env file, then
+/// pull + `up -d` + `ps` only that service on the remote. Records history.
+#[allow(clippy::too_many_arguments)]
+fn deploy_service(
+    resolved: &Resolved,
+    env_name: &str,
+    env: &EnvironmentSpec,
+    service: &str,
+    tag: &str,
+    dry_run: bool,
+    yes: bool,
+) -> Result<()> {
+    let svc = vec![service.to_string()];
+    let selected = select_images(env, &svc)?; // validates the name exists
+
+    print_header(env_name, env, tag);
+    println!(
+        "{} single service: {}",
+        "●".bright_blue(),
+        service.bright_cyan()
+    );
+
+    if env.require_confirm && !yes && !dry_run {
+        confirm(&format!(
+            "About to deploy service '{}' at tag '{}' to '{}' ({}). Proceed?",
+            service,
+            tag,
+            env_name,
+            env.host.as_deref().unwrap_or("?")
+        ))?;
+    }
+
+    let inner = deploy_service_inner(resolved, env_name, env, &selected, service, tag, dry_run);
+
+    // History epilogue (skipped on dry-run; that's a preview, not a real deploy).
+    if !dry_run {
+        let image_tags: BTreeMap<String, String> =
+            std::iter::once((service.to_string(), tag.to_string())).collect();
+        let record = match &inner {
+            Ok(snapshot) => HistoryRecord::new_push(tag.to_string(), image_tags, snapshot.clone()),
+            Err(e) => {
+                HistoryRecord::new_push(tag.to_string(), image_tags, None).with_failure(&e.to_string())
+            }
+        };
+        if let Err(e) = deploy_history::append_record(&resolved.workspace_root, env_name, &record) {
+            eprintln!("{} failed to record history: {e}", "warning:".yellow().bold());
+        }
+        if matches!(record.status, deploy_history::Status::Success) {
+            mirror_history_to_remote(resolved, env_name, env, &record);
+        }
+    }
+
+    inner.map(|_| {
+        println!(
+            "\n{} deployed service {} at tag {} to {}",
+            "✓".green().bold(),
+            service.bright_cyan(),
+            tag.bright_cyan(),
+            env_name.bright_cyan()
+        );
+    })
+}
+
+fn deploy_service_inner(
+    resolved: &Resolved,
+    env_name: &str,
+    env: &EnvironmentSpec,
+    selected: &BTreeMap<&String, &ImageSpec>,
+    service: &str,
+    tag: &str,
+    dry_run: bool,
+) -> Result<Option<String>> {
+    // 1. Bump just this service's *_TAG in the local env file.
+    let env_file = resolved.local_env_file(env, env_name);
+    update_env_file_tags_selected(&env_file, selected, tag, dry_run)?;
+
+    // 2. Snapshot for audit/rollback (skip on dry-run).
+    let snapshot = if dry_run {
+        None
+    } else {
+        snapshot_env_file(resolved, env, env_name, tag).ok()
+    };
+
+    // 3. scp env file to remote.
+    scp_env_file(resolved, env, env_name, dry_run)?;
+
+    // 4. Pull + up + ps — only this service.
+    let svc = vec![service.to_string()];
+    remote_compose_action(resolved, env_name, env, "pull", &svc, dry_run)?;
+    let up_args = vec!["-d".to_string(), service.to_string()];
+    remote_compose_action(resolved, env_name, env, "up", &up_args, dry_run)?;
+    remote_compose_action(resolved, env_name, env, "ps", &svc, dry_run)?;
+
+    Ok(snapshot)
+}
+
+/// Bump a service's `*_TAG` in the LOCAL env file only. No SSH, no deploy.
+fn bump(
+    resolved: &Resolved,
+    env_name: &str,
+    env: &EnvironmentSpec,
+    service: &str,
+    tag: &str,
+) -> Result<()> {
+    let svc = vec![service.to_string()];
+    let selected = select_images(env, &svc)?;
+    let image = selected.values().next().expect("exactly one image selected");
+    let var = image.tag_env.as_deref().ok_or_else(|| {
+        anyhow!(
+            "service '{}' has no tag_env in metaphor.deploy.yaml; cannot bump its tag",
+            service
+        )
+    })?;
+
+    let env_file = resolved.local_env_file(env, env_name);
+
+    // No-op detection (matches bump-prod-tag.sh): if already at this tag, stop.
+    if let Some(current) = read_env_var(&env_file, var) {
+        if current == tag {
+            println!("{} {} already at {}. No change.", "●".yellow(), var, tag.bright_cyan());
+            return Ok(());
+        }
+    }
+
+    update_env_file_tags_selected(&env_file, &selected, tag, false)?;
+    println!(
+        "\n{} {} → {} in {}",
+        "✓".green().bold(),
+        var,
+        tag.bright_cyan(),
+        env_file.display()
+    );
+    println!(
+        "  Next: review the diff, commit, then `metaphor deploy service {env_name} {service} {tag}`"
+    );
+    Ok(())
+}
+
+/// Read the first `KEY=VALUE` occurrence's value from an env file, if present.
+fn read_env_var(env_file: &Path, key: &str) -> Option<String> {
+    let content = std::fs::read_to_string(env_file).ok()?;
+    parse_env_values(&content).get(key).cloned()
+}
+
+// ────────────────────────────── preflight ──────────────────────────────
+
+const PLACEHOLDER_RE: &str = r"^(CHANGE_ME|TODO|REPLACE_ME|FILL_|XXX+)|<[^>]+>";
+
+/// Validate local prod env files before a push (local-only, no SSH).
+fn preflight(resolved: &Resolved, env_name: &str, env: &EnvironmentSpec) -> Result<()> {
+    println!(
+        "{} preflight {} ({})",
+        "▶".bright_blue().bold(),
+        env_name.bright_cyan(),
+        "validating local env files".bright_black()
+    );
+
+    let mut failed = false;
+
+    // Layer 1: per-service contract check. Auto-discovers any image whose
+    // `<context>/.env.prod.example` exists; skips those without one (webapps).
+    for (name, image) in &env.images {
+        let ctx = resolved.workspace_root.join(&image.context);
+        let contract = ctx.join(".env.prod.example");
+        let actual = ctx.join(".env.prod");
+        if !contract.is_file() {
+            continue;
+        }
+        if !actual.is_file() {
+            eprintln!(
+                "  {} {name}: runtime env file missing: {}",
+                "✗".red().bold(),
+                actual.display()
+            );
+            failed = true;
+            continue;
+        }
+        let req = required_vars(&std::fs::read_to_string(&contract)?);
+        let have = parse_env_values(&std::fs::read_to_string(&actual)?);
+        let (missing, placeholders) = check_contract(&req, &have);
+        if missing.is_empty() && placeholders.is_empty() {
+            println!(
+                "  {} {name}: all {} contract vars present",
+                "✓".green().bold(),
+                req.len()
+            );
+        } else {
+            for v in &missing {
+                eprintln!("      {} [missing]     {v}", "✗".red());
+            }
+            for v in &placeholders {
+                eprintln!("      {} [placeholder] {v}", "✗".red());
+            }
+            failed = true;
+        }
+    }
+    if failed {
+        bail!("preflight contract check failed");
+    }
+
+    // Layer 2: compose interpolation check (`docker compose config`).
+    let compose = resolved.local_compose_file(env);
+    let env_file = resolved.local_env_file(env, env_name);
+    let out = Command::new("docker")
+        .arg("compose")
+        .arg("-f")
+        .arg(&compose)
+        .arg("--env-file")
+        .arg(&env_file)
+        .arg("config")
+        .current_dir(&resolved.workspace_root)
+        .output()
+        .context("running `docker compose config`")?;
+    if !out.status.success() {
+        eprintln!("{}", String::from_utf8_lossy(&out.stderr));
+        bail!(
+            "compose validation failed: unresolved ${{VAR:?}} refs in {}",
+            env_file.display()
+        );
+    }
+    println!(
+        "  {} all compose-interpolated vars resolve in {}",
+        "✓".green().bold(),
+        env_file.display()
+    );
+    println!("\n{} preflight passed", "✓".green().bold());
+    Ok(())
+}
+
+/// Extract `^[A-Z_]+=` keys from a contract (`.env.prod.example`) file.
+fn required_vars(contract: &str) -> Vec<String> {
+    contract
+        .lines()
+        .filter_map(|l| {
+            let l = l.trim_start();
+            let key = l.split('=').next().unwrap_or("");
+            if !key.is_empty()
+                && key.bytes().all(|b| b.is_ascii_uppercase() || b == b'_')
+                && l[key.len()..].starts_with('=')
+            {
+                Some(key.to_string())
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Parse `KEY=VALUE` lines into a map (first occurrence wins, like `head -1`).
+fn parse_env_values(actual: &str) -> std::collections::HashMap<String, String> {
+    let mut m = std::collections::HashMap::new();
+    for line in actual.lines() {
+        let t = line.trim_start();
+        if t.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = t.split_once('=') {
+            m.entry(k.trim().to_string()).or_insert_with(|| v.to_string());
+        }
+    }
+    m
+}
+
+/// Returns (missing, placeholders) for required vars against parsed values.
+fn check_contract(
+    req: &[String],
+    have: &std::collections::HashMap<String, String>,
+) -> (Vec<String>, Vec<String>) {
+    let re = regex::Regex::new(PLACEHOLDER_RE).expect("static placeholder regex");
+    let (mut missing, mut placeholders) = (vec![], vec![]);
+    for var in req {
+        match have.get(var) {
+            None => missing.push(var.clone()),
+            Some(v) if v.is_empty() => missing.push(var.clone()),
+            Some(v) if re.is_match(v) => placeholders.push(format!("{var}={v}")),
+            _ => {}
+        }
+    }
+    (missing, placeholders)
+}
+
 // ────────────────────────────── helpers ──────────────────────────────
 
 fn ssh_target(resolved: &Resolved, env: &EnvironmentSpec) -> Result<String> {
@@ -1114,6 +1530,7 @@ fn is_executable(p: &Path) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use tempfile::TempDir;
 
     #[test]
     fn replaces_existing_key() {
@@ -1184,5 +1601,129 @@ mod tests {
         let ps = vec![proj("api", "backend-service"), proj("infra", "infra")];
         let e = pick_infra(&ps, Some("api")).unwrap_err().to_string();
         assert!(e.contains("not 'infra'"));
+    }
+
+    // ───────────── single-service deploy / bump / preflight ─────────────
+
+    fn img(context: &str, tag_env: Option<&str>) -> ImageSpec {
+        ImageSpec {
+            context: context.into(),
+            dockerfile: None,
+            registry: None,
+            name: None,
+            tag_env: tag_env.map(|s| s.into()),
+            build_args: BTreeMap::new(),
+            push: None,
+        }
+    }
+
+    fn env_with(images: Vec<(&str, ImageSpec)>) -> EnvironmentSpec {
+        EnvironmentSpec {
+            host: Some("h".into()),
+            ssh_user: None,
+            deploy_dir: None,
+            compose_file: None,
+            env_file: None,
+            registry: None,
+            require_confirm: false,
+            images: images.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+        }
+    }
+
+    #[test]
+    fn select_images_empty_returns_all() {
+        let env = env_with(vec![
+            ("api", img("apps/api", Some("SERVICE_TAG"))),
+            ("web", img("apps/web", Some("WEB_TAG"))),
+        ]);
+        let sel = select_images(&env, &[]).unwrap();
+        assert_eq!(sel.len(), 2);
+    }
+
+    #[test]
+    fn select_images_subset() {
+        let env = env_with(vec![
+            ("api", img("apps/api", Some("SERVICE_TAG"))),
+            ("web", img("apps/web", Some("WEB_TAG"))),
+        ]);
+        let sel = select_images(&env, &["web".to_string()]).unwrap();
+        assert_eq!(sel.len(), 1);
+        assert!(sel.contains_key(&"web".to_string()));
+    }
+
+    #[test]
+    fn select_images_unknown_errors_with_available() {
+        let env = env_with(vec![("api", img("apps/api", Some("SERVICE_TAG")))]);
+        let e = select_images(&env, &["nope".to_string()]).unwrap_err().to_string();
+        assert!(e.contains("not found"));
+        assert!(e.contains("available: api"));
+    }
+
+    #[test]
+    fn update_selected_errors_on_missing_tag_env() {
+        let tmp = TempDir::new().unwrap();
+        let envf = tmp.path().join(".env.prod");
+        std::fs::write(&envf, "FOO=bar\n").unwrap();
+        let env = env_with(vec![("svc", img("apps/svc", None))]);
+        let sel = select_images(&env, &["svc".to_string()]).unwrap();
+        let e = update_env_file_tags_selected(&envf, &sel, "v1", false)
+            .unwrap_err()
+            .to_string();
+        assert!(e.contains("no tag_env"));
+    }
+
+    #[test]
+    fn update_selected_writes_only_selected_tag() {
+        let tmp = TempDir::new().unwrap();
+        let envf = tmp.path().join(".env.prod");
+        std::fs::write(&envf, "SERVICE_TAG=v0\nWEB_TAG=v0\n").unwrap();
+        let env = env_with(vec![
+            ("api", img("apps/api", Some("SERVICE_TAG"))),
+            ("web", img("apps/web", Some("WEB_TAG"))),
+        ]);
+        let sel = select_images(&env, &["web".to_string()]).unwrap();
+        update_env_file_tags_selected(&envf, &sel, "v9", false).unwrap();
+        let out = std::fs::read_to_string(&envf).unwrap();
+        assert!(out.contains("SERVICE_TAG=v0"));
+        assert!(out.contains("WEB_TAG=v9"));
+    }
+
+    #[test]
+    fn required_vars_picks_uppercase_assignments() {
+        let c = "# comment\nFOO=1\nBAR_BAZ=2\nlower=3\n  INDENTED=4\nNOEQ\n";
+        let req = required_vars(c);
+        assert_eq!(req, vec!["FOO", "BAR_BAZ", "INDENTED"]);
+    }
+
+    #[test]
+    fn parse_env_values_first_occurrence_wins() {
+        let m = parse_env_values("A=1\nA=2\nB=\nC=a=b\n# D=x\n");
+        assert_eq!(m.get("A").unwrap(), "1");
+        assert_eq!(m.get("B").unwrap(), "");
+        assert_eq!(m.get("C").unwrap(), "a=b");
+        assert!(!m.contains_key("D"));
+    }
+
+    #[test]
+    fn check_contract_flags_missing_empty_and_placeholder() {
+        let req = vec![
+            "OK".to_string(),
+            "MISSING".to_string(),
+            "EMPTY".to_string(),
+            "PH".to_string(),
+            "ANGLE".to_string(),
+        ];
+        let mut have = std::collections::HashMap::new();
+        have.insert("OK".to_string(), "v0.5.2".to_string());
+        have.insert("EMPTY".to_string(), "".to_string());
+        have.insert("PH".to_string(), "CHANGE_ME_please".to_string());
+        have.insert("ANGLE".to_string(), "<your-key>".to_string());
+        let (missing, placeholders) = check_contract(&req, &have);
+        assert!(missing.contains(&"MISSING".to_string()));
+        assert!(missing.contains(&"EMPTY".to_string()));
+        assert!(placeholders.iter().any(|p| p.starts_with("PH=")));
+        assert!(placeholders.iter().any(|p| p.starts_with("ANGLE=")));
+        assert_eq!(missing.len(), 2);
+        assert_eq!(placeholders.len(), 2);
     }
 }
