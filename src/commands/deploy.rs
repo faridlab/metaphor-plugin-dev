@@ -110,13 +110,18 @@ pub enum DeployAction {
         follow: bool,
     },
 
-    /// Run database migrations against the remote env over an SSH tunnel.
+    /// Run database migrations against a remote env by exec'ing the stack's `migrations` service over SSH
+    /// (`docker compose run --rm migrations …`). Prompts for confirmation on `require_confirm` envs.
     Migrate {
         env: String,
 
-        /// Print the tunnel + migrate commands without executing.
+        /// Print the SSH + compose migrate command without executing.
         #[arg(long)]
         dry_run: bool,
+
+        /// Proceed without the interactive confirmation (required for `require_confirm` envs — e.g. CI).
+        #[arg(long)]
+        yes: bool,
     },
 
     /// Deploy ONE pre-built service from the registry.
@@ -255,9 +260,9 @@ pub async fn handle_command(action: &DeployAction) -> Result<()> {
             }
             remote_compose(&resolved, env, env_spec, &args)
         }
-        DeployAction::Migrate { env, dry_run } => {
+        DeployAction::Migrate { env, dry_run, yes } => {
             let env_spec = require_remote(&resolved, env)?;
-            migrate(&resolved, env, env_spec, *dry_run)
+            migrate(&resolved, env, env_spec, *dry_run, *yes)
         }
         DeployAction::Service {
             env,
@@ -392,9 +397,10 @@ fn push_inner(
     remote_compose_action(resolved, env_name, env, "pull", &[], opts.dry_run)?;
     remote_compose_action(resolved, env_name, env, "up", &["-d".into()], opts.dry_run)?;
 
-    // 6. Optional migrations
+    // 6. Optional migrations — push already ran its own confirmation gate above,
+    // so skip the migrate gate here (yes=true) to avoid a double prompt.
     if !opts.skip_migrate {
-        migrate(resolved, env_name, env, opts.dry_run)?;
+        migrate(resolved, env_name, env, opts.dry_run, true)?;
     } else {
         println!("{} skipping migrations (per --skip-migrate)", "●".yellow());
     }
@@ -721,6 +727,7 @@ fn migrate(
     env_name: &str,
     env: &EnvironmentSpec,
     dry_run: bool,
+    yes: bool,
 ) -> Result<()> {
     let cmd = resolved
         .manifest
@@ -728,6 +735,30 @@ fn migrate(
         .migrate_command
         .clone()
         .unwrap_or_else(|| "metaphor migration run-all".to_string());
+
+    // Confirmation gate — migrations against a `require_confirm` env (prod) are
+    // irreversible schema/data changes. Require the operator to type the exact env
+    // name to proceed. `--yes` bypasses it for CI; `--dry-run` never runs anything.
+    if env.require_confirm && !yes && !dry_run {
+        eprintln!(
+            "{} about to run migrations against {} ({}) — this is IRREVERSIBLE.",
+            "⚠ migrate".bright_yellow().bold(),
+            env_name.bright_white().bold(),
+            env.host.as_deref().unwrap_or("?")
+        );
+        eprint!(
+            "  type the env name ({}) to proceed: ",
+            env_name.bright_yellow()
+        );
+        std::io::stderr().flush().ok();
+        let mut buf = String::new();
+        std::io::stdin()
+            .read_line(&mut buf)
+            .context("reading confirmation")?;
+        if buf.trim() != env_name {
+            bail!("aborted: confirmation did not match '{}'", env_name);
+        }
+    }
 
     // For now we run the migration command directly against the remote compose
     // stack by execing it through the service container. Rationale: SSH tunnels
