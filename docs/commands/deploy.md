@@ -446,8 +446,15 @@ Run database migrations against the remote environment.
 ### Synopsis
 
 ```
-metaphor-dev deploy migrate <ENV> [--dry-run]
+metaphor-dev deploy migrate <ENV> [--dry-run] [--yes]
 ```
+
+### Options
+
+| Flag | Type | Default | Meaning |
+|------|------|---------|---------|
+| `--dry-run` | bool | `false` | Print the SSH + compose migrate command without executing (never prompts) |
+| `-y`, `--yes` | bool | `false` | Skip the typed-env-name confirmation for `require_confirm` envs (required in CI) |
 
 ### Behavior
 
@@ -455,11 +462,15 @@ Runs `docker compose run --rm migrations sh -lc "<migrate_command>"` on the remo
 
 This assumes the compose file declares a `migrations` service (typically a one-shot container that shares the application image and has database access).
 
+**Confirmation gate.** Migrations against an environment with `require_confirm: true` (e.g. prod) are irreversible schema/data changes, so `deploy migrate` requires the operator to **type the exact env name** to proceed — a plain keypress is not enough. Pass `--yes` to bypass this (CI), or `--dry-run` which never executes anything. A migration triggered as part of `deploy push` reuses `push`'s own confirmation and is not prompted a second time.
+
 ### Examples
 
 ```sh
 metaphor-dev deploy migrate uat
 metaphor-dev deploy migrate prod --dry-run
+metaphor-dev deploy migrate prod            # prompts: type "prod" to proceed
+metaphor-dev deploy migrate prod --yes      # CI: no prompt
 ```
 
 > If your migration workflow uses an SSH tunnel from the operator's machine instead (e.g. `ssh -L 5433:postgres:5432 deploy@host` + a local `metaphor migration run-all`), set `defaults.migrate_command` to a wrapper script that performs the tunnel-based flow.
@@ -536,7 +547,7 @@ metaphor-dev deploy exec --infra infra-prod -- --tag $GIT_SHA
 | `environments.<env>.compose_file` | per-env, falls back to `defaults.compose_file` | Compose file path **relative to `deploy_dir`** on the remote host |
 | `environments.<env>.env_file` | per-env, falls back to `.env.<env>` | Env file path; resolved against the workspace root locally and `deploy_dir` remotely |
 | `environments.<env>.registry` | per-env, falls back to `defaults.registry`, then per-image override | Container registry prefix used for pushed image tags |
-| `environments.<env>.require_confirm` | per-env | Prompt before push/rollback unless `--yes` |
+| `environments.<env>.require_confirm` | per-env | Prompt before push/rollback/service (and type-env-name confirm before migrate) unless `--yes` |
 | `environments.<env>.images.<key>` | per-env | Image build spec; see [Configuration Reference](../reference/configuration.md#metaphordeployyaml) |
 | `defaults.migrate_command` | top-level | Command run by `deploy migrate` (default `metaphor migration run-all`) |
 

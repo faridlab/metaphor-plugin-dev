@@ -5,6 +5,22 @@ All notable changes to `metaphor-plugin-dev` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.8] - 2026-07-13
+
+### Changed
+
+- `deploy migrate <env>` now gates on a **typed env-name confirmation** for
+  `require_confirm` environments — the operator must type the exact env name to
+  proceed, so an irreversible prod migration can't run on a stray keypress. Added
+  `--yes` to bypass the prompt in CI; `--dry-run` still never executes. Migrations
+  run as part of `deploy push` reuse push's own confirmation and are not prompted
+  twice.
+
+### Documentation
+
+- Documented the `deploy migrate` confirmation gate and `--yes` flag in
+  `docs/commands/deploy.md`.
+
 ## [0.1.7] - 2026-06-30
 
 ### Added
