@@ -5,6 +5,17 @@ All notable changes to `metaphor-plugin-dev` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.9] - 2026-08-16
+
+### Added
+
+- `lint check|all` now runs `metaphor-schema validate-workspace` **before**
+  clippy, so the ADR-0014 company-fence sweep is machine-checked on every
+  lint — a module without a `company_fence:` declaration fails the lint, not
+  just a distant validate. Inside a module directory the gate scopes to that
+  module alone (an unswept sibling elsewhere in the workspace never fails
+  your local lint).
+
 ## [0.1.8] - 2026-07-13
 
 ### Changed
