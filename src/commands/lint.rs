@@ -139,6 +139,94 @@ pub async fn handle_command(action: &LintAction) -> Result<()> {
     }
 }
 
+/// Run the ADR-0014 company-fence declarations gate before clippy.
+///
+/// Scope follows CWD: inside a schema module (a `schema/models/index.model.yaml`
+/// at CWD) it runs the per-module `schema validate`, which hard-fails on THAT
+/// module's missing `company_fence:` posture — a module's lint must not go red
+/// over still-unswept siblings in the surrounding workspace, or no module could
+/// land its declaration before the sweep completes. Everywhere else under a
+/// workspace it runs `validate-workspace` (cross-module FKs + one explicit
+/// posture per schema module). Skips with a note when there is no workspace to
+/// sweep or the schema plugin binary is not installed.
+async fn run_schema_declarations_gate() -> Result<()> {
+    let cwd = std::env::current_dir()?;
+
+    // No metaphor.yaml above CWD → nothing to sweep (e.g. a bare crate repo).
+    let mut dir = cwd.clone();
+    loop {
+        if dir.join("metaphor.yaml").is_file() || dir.join("metaphor.yml").is_file() {
+            break;
+        }
+        if !dir.pop() {
+            println!(
+                "  {} no metaphor.yaml found above CWD — skipping schema declarations gate",
+                "⏭️".bright_yellow()
+            );
+            return Ok(());
+        }
+    }
+
+    // Per-module validate resolves the module from CWD via the workspace, so it
+    // needs the workspace check above to have passed before it can run.
+    let per_module = cwd.join("schema/models/index.model.yaml").is_file();
+    let mut command = Command::new("metaphor-schema");
+    if per_module {
+        command.arg("schema").arg("validate");
+    } else {
+        command.arg("validate-workspace");
+    }
+
+    println!(
+        "{}",
+        if per_module {
+            "🛡️  Checking schema declarations (company_fence posture for this module)..."
+                .bright_cyan()
+                .bold()
+        } else {
+            "🛡️  Checking schema declarations (company_fence + cross-module FKs)..."
+                .bright_cyan()
+                .bold()
+        }
+    );
+
+    let status = match command.status() {
+        Ok(status) => status,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            println!(
+                "  {} metaphor-schema not on PATH — skipping schema declarations gate \
+                 (install the schema plugin to enable it)",
+                "⏭️".bright_yellow()
+            );
+            return Ok(());
+        }
+        Err(e) => {
+            return Err(e).context(if per_module {
+                "Failed to run metaphor-schema schema validate"
+            } else {
+                "Failed to run metaphor-schema validate-workspace"
+            })
+        }
+    };
+
+    println!();
+
+    if !status.success() {
+        anyhow::bail!(
+            "schema declarations gate failed — every schema module needs an explicit \
+             'company_fence:' posture (strict | shared_blank | shared_tree | none) in its \
+             index.model.yaml{}",
+            if per_module {
+                ""
+            } else {
+                ", and every cross-module FK must resolve"
+            }
+        );
+    }
+
+    Ok(())
+}
+
 /// Run clippy linter
 async fn run_clippy(
     module: Option<&str>,
@@ -151,6 +239,10 @@ async fn run_clippy(
         "🔍 Running Clippy linter...".bright_cyan().bold()
     );
     println!();
+
+    // Declarations gate first — a fence posture drift is a schema bug, and there
+    // is no point paying for a clippy run on a workspace that already fails it.
+    run_schema_declarations_gate().await?;
 
     let mut args = vec!["clippy"];
 
