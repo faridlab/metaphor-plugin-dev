@@ -5,6 +5,20 @@ All notable changes to `metaphor-plugin-dev` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.10] - 2026-09-10
+
+### Added
+
+- `metaphor chaos` — a thin forwarder to the workspace's fault-injection kit
+  (`deployment/chaos/run.sh`), so the post-change chaos gate has a first-class
+  CLI entry: `metaphor chaos list`, `metaphor chaos --dry-run all`,
+  `metaphor chaos <experiment>`, `metaphor chaos --full all`. Resolves the
+  workspace root from `metaphor.yaml`, refuses loudly when the workspace ships
+  no kit (pointing at the metaphor-workspace template), forwards every
+  argument verbatim, and exits with the driver's exit code so CI and agents
+  can gate on it. No fault logic lives in Rust — the bash driver stays the
+  single source of truth for the catalog and verdict semantics.
+
 ## [0.1.9] - 2026-08-16
 
 ### Added
