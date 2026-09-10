@@ -1,7 +1,7 @@
 //! Metaphor Dev Plugin — development workflow commands.
 //!
 //! Binary: `metaphor-dev`
-//! Commands: dev, lint, test, docs, config, jobs, docker, deploy
+//! Commands: dev, lint, test, docs, config, jobs, docker, deploy, chaos
 
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -82,6 +82,14 @@ enum Command {
         #[command(subcommand)]
         action: DeployAction,
     },
+
+    /// Chaos gate — forward to the workspace's fault-injection kit
+    /// (`deployment/chaos/run.sh`). Dev stack only.
+    #[command(trailing_var_arg = true, allow_external_subcommands = true)]
+    Chaos {
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[tokio::main]
@@ -105,5 +113,6 @@ async fn main() -> Result<()> {
         Command::Jobs { action } => metaphor_dev::commands::jobs::handle_jobs_command(action).await,
         Command::Docker { action } => metaphor_dev::commands::docker::handle_command(action).await,
         Command::Deploy { action } => metaphor_dev::commands::deploy::handle_command(action).await,
+        Command::Chaos { args } => metaphor_dev::commands::chaos::handle_chaos_command(&args).await,
     }
 }

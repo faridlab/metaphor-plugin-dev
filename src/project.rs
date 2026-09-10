@@ -69,6 +69,22 @@ pub fn resolve_from(start: &Path) -> Result<ResolvedProject> {
     resolve_standalone(start)
 }
 
+/// Resolve the workspace root: the nearest ancestor directory holding
+/// `metaphor.yaml`.
+///
+/// Unlike [`resolve`], this picks no project — commands that operate on the
+/// workspace as a whole (deployment, chaos kit, compose lifecycle) work in
+/// multi-app workspaces where picking a single backend-service project is
+/// neither possible nor needed.
+pub fn workspace_root() -> Result<PathBuf> {
+    let cwd = std::env::current_dir().context("failed to read current directory")?;
+    find_metaphor_yaml(&cwd)
+        .and_then(|yaml| yaml.parent().map(Path::to_path_buf))
+        .ok_or_else(|| {
+            anyhow!("no metaphor.yaml found in this directory or any parent — run from inside a workspace")
+        })
+}
+
 fn find_metaphor_yaml(start: &Path) -> Option<PathBuf> {
     let mut cur = Some(start);
     while let Some(dir) = cur {

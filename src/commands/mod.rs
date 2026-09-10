@@ -1,3 +1,4 @@
+pub mod chaos;
 pub mod config;
 pub mod deploy;
 pub mod deploy_history;
