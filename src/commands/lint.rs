@@ -131,9 +131,11 @@ pub async fn handle_command(action: &LintAction) -> Result<()> {
 
         LintAction::Outdated { direct, compatible } => run_outdated(*direct, *compatible).await,
 
-        LintAction::All { module, strict, fix } => {
-            run_all_checks(module.as_deref(), *strict, *fix).await
-        }
+        LintAction::All {
+            module,
+            strict,
+            fix,
+        } => run_all_checks(module.as_deref(), *strict, *fix).await,
 
         LintAction::Config => show_config().await,
     }
@@ -228,16 +230,8 @@ async fn run_schema_declarations_gate() -> Result<()> {
 }
 
 /// Run clippy linter
-async fn run_clippy(
-    module: Option<&str>,
-    strict: bool,
-    fix: bool,
-    pedantic: bool,
-) -> Result<()> {
-    println!(
-        "{}",
-        "🔍 Running Clippy linter...".bright_cyan().bold()
-    );
+async fn run_clippy(module: Option<&str>, strict: bool, fix: bool, pedantic: bool) -> Result<()> {
+    println!("{}", "🔍 Running Clippy linter...".bright_cyan().bold());
     println!();
 
     // Declarations gate first — a fence posture drift is a schema bug, and there
@@ -312,20 +306,14 @@ async fn run_clippy(
     println!();
 
     if status.success() {
-        println!(
-            "  {} Clippy passed!",
-            "✅".green()
-        );
+        println!("  {} Clippy passed!", "✅".green());
     } else if fix {
         println!(
             "  {} Some issues were fixed, please review changes",
             "🔧".yellow()
         );
     } else {
-        println!(
-            "  {} Clippy found issues",
-            "❌".red()
-        );
+        println!("  {} Clippy found issues", "❌".red());
         if !fix {
             println!(
                 "  {} Run with --fix to auto-fix where possible",
@@ -339,10 +327,7 @@ async fn run_clippy(
 
 /// Run rustfmt
 async fn run_fmt(module: Option<&str>, check: bool, diff: bool) -> Result<()> {
-    println!(
-        "{}",
-        "🎨 Running rustfmt...".bright_cyan().bold()
-    );
+    println!("{}", "🎨 Running rustfmt...".bright_cyan().bold());
     println!();
 
     let mut args = vec!["fmt"];
@@ -369,34 +354,20 @@ async fn run_fmt(module: Option<&str>, check: bool, diff: bool) -> Result<()> {
         println!();
         println!("  {} Changes made:", "📝".bright_blue());
 
-        Command::new("git")
-            .args(["diff", "--stat"])
-            .status()?;
+        Command::new("git").args(["diff", "--stat"]).status()?;
     }
 
     println!();
 
     if status.success() {
         if check {
-            println!(
-                "  {} Code is properly formatted!",
-                "✅".green()
-            );
+            println!("  {} Code is properly formatted!", "✅".green());
         } else {
-            println!(
-                "  {} Code formatted!",
-                "✅".green()
-            );
+            println!("  {} Code formatted!", "✅".green());
         }
     } else if check {
-        println!(
-            "  {} Code needs formatting",
-            "❌".red()
-        );
-        println!(
-            "  {} Run without --check to fix",
-            "💡".bright_blue()
-        );
+        println!("  {} Code needs formatting", "❌".red());
+        println!("  {} Run without --check to fix", "💡".bright_blue());
     }
 
     Ok(())
@@ -404,10 +375,7 @@ async fn run_fmt(module: Option<&str>, check: bool, diff: bool) -> Result<()> {
 
 /// Run compilation check
 async fn run_compile(module: Option<&str>, release: bool) -> Result<()> {
-    println!(
-        "{}",
-        "🔨 Running compilation check...".bright_cyan().bold()
-    );
+    println!("{}", "🔨 Running compilation check...".bright_cyan().bold());
     println!();
 
     let mut args = vec!["check"];
@@ -431,15 +399,9 @@ async fn run_compile(module: Option<&str>, release: bool) -> Result<()> {
     println!();
 
     if status.success() {
-        println!(
-            "  {} Compilation successful!",
-            "✅".green()
-        );
+        println!("  {} Compilation successful!", "✅".green());
     } else {
-        println!(
-            "  {} Compilation failed",
-            "❌".red()
-        );
+        println!("  {} Compilation failed", "❌".red());
     }
 
     Ok(())
@@ -447,16 +409,11 @@ async fn run_compile(module: Option<&str>, release: bool) -> Result<()> {
 
 /// Run security audit
 async fn run_audit(fix: bool, format: &str) -> Result<()> {
-    println!(
-        "{}",
-        "🔒 Running security audit...".bright_cyan().bold()
-    );
+    println!("{}", "🔒 Running security audit...".bright_cyan().bold());
     println!();
 
     // Check if cargo-audit is installed
-    let audit_check = Command::new("cargo")
-        .args(["audit", "--version"])
-        .output();
+    let audit_check = Command::new("cargo").args(["audit", "--version"]).output();
 
     if audit_check.is_err() {
         println!(
@@ -494,15 +451,9 @@ async fn run_audit(fix: bool, format: &str) -> Result<()> {
     println!();
 
     if status.success() {
-        println!(
-            "  {} No known vulnerabilities found!",
-            "✅".green()
-        );
+        println!("  {} No known vulnerabilities found!", "✅".green());
     } else {
-        println!(
-            "  {} Security vulnerabilities detected",
-            "⚠️".yellow()
-        );
+        println!("  {} Security vulnerabilities detected", "⚠️".yellow());
         if !fix {
             println!(
                 "  {} Run with --fix to attempt auto-fix",
@@ -518,7 +469,9 @@ async fn run_audit(fix: bool, format: &str) -> Result<()> {
 async fn run_outdated(direct: bool, compatible: bool) -> Result<()> {
     println!(
         "{}",
-        "📦 Checking for outdated dependencies...".bright_cyan().bold()
+        "📦 Checking for outdated dependencies..."
+            .bright_cyan()
+            .bold()
     );
     println!();
 
@@ -571,10 +524,7 @@ async fn run_all_checks(module: Option<&str>, strict: bool, fix: bool) -> Result
     let mut all_passed = true;
 
     // 1. Format check/fix
-    println!(
-        "{}",
-        "Step 1/4: Code formatting".bright_white().bold()
-    );
+    println!("{}", "Step 1/4: Code formatting".bright_white().bold());
     if let Err(e) = run_fmt(module, !fix, false).await {
         println!("  {} Formatting check failed: {}", "❌".red(), e);
         all_passed = false;
@@ -582,10 +532,7 @@ async fn run_all_checks(module: Option<&str>, strict: bool, fix: bool) -> Result
     println!();
 
     // 2. Compilation check
-    println!(
-        "{}",
-        "Step 2/4: Compilation check".bright_white().bold()
-    );
+    println!("{}", "Step 2/4: Compilation check".bright_white().bold());
     if let Err(e) = run_compile(module, false).await {
         println!("  {} Compilation check failed: {}", "❌".red(), e);
         all_passed = false;
@@ -593,10 +540,7 @@ async fn run_all_checks(module: Option<&str>, strict: bool, fix: bool) -> Result
     println!();
 
     // 3. Clippy
-    println!(
-        "{}",
-        "Step 3/4: Clippy linting".bright_white().bold()
-    );
+    println!("{}", "Step 3/4: Clippy linting".bright_white().bold());
     if let Err(e) = run_clippy(module, strict, fix, false).await {
         println!("  {} Clippy failed: {}", "❌".red(), e);
         all_passed = false;
@@ -604,16 +548,9 @@ async fn run_all_checks(module: Option<&str>, strict: bool, fix: bool) -> Result
     println!();
 
     // 4. Security audit (optional, don't fail on this)
-    println!(
-        "{}",
-        "Step 4/4: Security audit".bright_white().bold()
-    );
+    println!("{}", "Step 4/4: Security audit".bright_white().bold());
     if let Err(e) = run_audit(false, "text").await {
-        println!(
-            "  {} Security audit had issues: {}",
-            "⚠️".yellow(),
-            e
-        );
+        println!("  {} Security audit had issues: {}", "⚠️".yellow(), e);
     }
 
     println!();
@@ -621,15 +558,9 @@ async fn run_all_checks(module: Option<&str>, strict: bool, fix: bool) -> Result
     println!();
 
     if all_passed {
-        println!(
-            "{}",
-            "All quality checks passed! 🎉".bright_green().bold()
-        );
+        println!("{}", "All quality checks passed! 🎉".bright_green().bold());
     } else {
-        println!(
-            "{}",
-            "Some quality checks failed ❌".bright_red().bold()
-        );
+        println!("{}", "Some quality checks failed ❌".bright_red().bold());
         if !fix {
             println!(
                 "  {} Run with --fix to attempt auto-fixes",
@@ -645,22 +576,18 @@ async fn run_all_checks(module: Option<&str>, strict: bool, fix: bool) -> Result
 async fn show_config() -> Result<()> {
     println!(
         "{}",
-        "📋 Metaphor Framework Clippy Configuration".bright_cyan().bold()
+        "📋 Metaphor Framework Clippy Configuration"
+            .bright_cyan()
+            .bold()
     );
     println!();
 
-    println!(
-        "{}",
-        "Denied lints (errors):".bright_white().bold()
-    );
+    println!("{}", "Denied lints (errors):".bright_white().bold());
     println!("  - clippy::unwrap_used    (use ? or handle errors)");
     println!("  - clippy::expect_used    (use ? or handle errors)");
     println!();
 
-    println!(
-        "{}",
-        "Warned lints:".bright_white().bold()
-    );
+    println!("{}", "Warned lints:".bright_white().bold());
     println!("  - clippy::todo           (mark incomplete code)");
     println!("  - clippy::dbg_macro      (remove debug macros)");
     println!("  - clippy::print_stdout   (use tracing instead)");
@@ -678,7 +605,9 @@ async fn show_config() -> Result<()> {
 
     println!(
         "{}",
-        "Allowed lints (framework exceptions):".bright_white().bold()
+        "Allowed lints (framework exceptions):"
+            .bright_white()
+            .bold()
     );
     println!("  - clippy::module_inception     (we use domain/domain.rs pattern)");
     println!("  - clippy::too_many_arguments   (builder pattern uses many args)");
@@ -686,7 +615,9 @@ async fn show_config() -> Result<()> {
 
     println!(
         "{}",
-        "To add project-specific configuration:".bright_white().bold()
+        "To add project-specific configuration:"
+            .bright_white()
+            .bold()
     );
     println!("  Create a clippy.toml in the project root with:");
     println!();
@@ -697,10 +628,7 @@ async fn show_config() -> Result<()> {
     println!("  ```");
     println!();
 
-    println!(
-        "{}",
-        "Or add to Cargo.toml:".bright_white().bold()
-    );
+    println!("{}", "Or add to Cargo.toml:".bright_white().bold());
     println!();
     println!("  ```toml");
     println!("  [lints.clippy]");
