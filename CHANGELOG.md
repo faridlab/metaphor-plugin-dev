@@ -5,6 +5,39 @@ All notable changes to `metaphor-plugin-dev` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- `metaphor lint` now exits non-zero when a gate finds something. Every check —
+  clippy, rustfmt, the compilation check, the security audit and the aggregate
+  `lint all` — printed a red cross and returned success, so any script or CI job
+  built on the command reported a green lint over broken code. Each gate now
+  reports a pass/fail/skip outcome that reaches the process exit code, and
+  `lint all` names every gate that failed in its verdict.
+- `lint all` no longer claims "All quality checks passed" when checks failed. Its
+  pass flag only flipped on an error return that the gates never produced, so the
+  celebratory summary printed unconditionally.
+- A missing `cargo-audit` or `cargo-outdated` is detected correctly. The probe
+  tested whether spawning cargo itself failed, which it does not when only the
+  subcommand is absent, so the missing tool fell through to the real invocation
+  and its "no such subcommand" exit was reported as if vulnerabilities had been
+  found. A missing tool is now reported as a skip, and the dead auto-install
+  branch that could never be reached has been removed — a lint command does not
+  install software behind the caller's back.
+- A `cargo-audit` run that cannot read its advisory database is reported as a
+  skipped scan instead of as detected vulnerabilities, so nobody chases CVEs
+  that were never read.
+
+### Added
+
+- `--require-tools` on `metaphor lint check` and `metaphor lint all`, which turns
+  a skipped gate into a failure. Without it a pipeline can go green because a
+  linter was missing from the image; with it, the gate must actually have run.
+- `--strict` on `metaphor lint all` now also promotes a security finding from
+  advisory to blocking. The audit stays advisory by default so an advisory
+  published upstream today does not break a build that changed nothing.
+
 ## [0.1.10] - 2026-09-10
 
 ### Added
