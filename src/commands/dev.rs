@@ -548,13 +548,42 @@ async fn start_local_dev_server(grpc_only: bool, rest_only: bool, port: u16) -> 
     let status = child.wait()
         .context("Failed to wait for Metaphor application")?;
 
-    if status.success() {
-        println!("✅ Local server stopped successfully");
-    } else {
-        println!("❌ Local server stopped with error");
+    match classify_stop(status.code()) {
+        ServerStop::Clean => println!("✅ Local server stopped successfully"),
+        ServerStop::Signalled => println!("🛑 Local server stopped by a signal (Ctrl+C)"),
+        ServerStop::Failed(code) => {
+            println!("❌ Local server exited with status {code}");
+            anyhow::bail!("the local server exited with status {code}");
+        }
     }
 
     Ok(())
+}
+
+/// How a foreground child process ended.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ServerStop {
+    /// Exited zero.
+    Clean,
+    /// Ended by a signal, which is what Ctrl+C looks like and the ordinary way
+    /// to stop a dev server.
+    Signalled,
+    /// Exited non-zero: the application itself failed.
+    Failed(i32),
+}
+
+/// Tell a crashed server apart from a stopped one.
+///
+/// `ExitStatus::code()` is `None` when the child was ended by a signal. Folding
+/// that in with a real non-zero exit would make an ordinary Ctrl+C quit report
+/// failure; keeping them apart lets a genuine crash reach the caller's exit
+/// code while a deliberate stop stays quiet.
+pub(crate) fn classify_stop(code: Option<i32>) -> ServerStop {
+    match code {
+        Some(0) => ServerStop::Clean,
+        None => ServerStop::Signalled,
+        Some(code) => ServerStop::Failed(code),
+    }
 }
 
 /// Start gRPC services only
@@ -960,4 +989,27 @@ fn provide_dev_setup_instructions() {
 
     println!("🚀 Now you're ready to develop!");
     println!("💡 Check the generated files under your app's demo/ directory");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_zero_exit_is_a_clean_stop() {
+        assert_eq!(classify_stop(Some(0)), ServerStop::Clean);
+    }
+
+    #[test]
+    fn a_signal_is_a_stop_not_a_failure() {
+        // Ctrl+C leaves no exit code. Treating it as a failure would make every
+        // ordinary quit of `metaphor dev serve` exit non-zero.
+        assert_eq!(classify_stop(None), ServerStop::Signalled);
+    }
+
+    #[test]
+    fn a_non_zero_exit_is_the_application_failing() {
+        assert_eq!(classify_stop(Some(1)), ServerStop::Failed(1));
+        assert_eq!(classify_stop(Some(101)), ServerStop::Failed(101));
+    }
 }

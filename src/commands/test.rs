@@ -1200,14 +1200,17 @@ async fn run_tests(
             "{}",
             "All tests passed! ✅".bright_green().bold()
         );
-    } else {
-        println!(
-            "{}",
-            "Some tests failed ❌".bright_red().bold()
-        );
+        return Ok(());
     }
 
-    Ok(())
+    // A red test run must reach the process exit code. Printing the failure and
+    // returning success makes every script, hook and CI job that gates on
+    // `metaphor test` gate on nothing at all.
+    println!(
+        "{}",
+        "Some tests failed ❌".bright_red().bold()
+    );
+    anyhow::bail!("cargo test reported failing tests")
 }
 
 /// Generate test coverage report
