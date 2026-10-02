@@ -43,10 +43,10 @@ chrono = { version = "0.4", features = ["serde"] }
 regex = "1"
 
 # HTTP client for health checks
-reqwest = { version = "0.11", features = ["json"] }
+reqwest = { version = "0.11", default-features = false, features = ["json", "rustls-tls"] }
 
 # SMTP configuration validation
-lettre = { version = "0.11", features = ["smtp-transport", "native-tls", "builder"] }
+lettre = { version = "0.11", default-features = false, features = ["smtp-transport", "rustls-tls", "builder", "hostname", "pool"] }
 
 # URL parsing
 url = "2"
