@@ -6,5 +6,6 @@ pub mod dev;
 pub mod docker;
 pub mod docs;
 pub mod jobs;
+pub mod link;
 pub mod lint;
 pub mod test;

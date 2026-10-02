@@ -56,6 +56,24 @@ pub enum DevAction {
         #[command(subcommand)]
         action: DbAction,
     },
+    /// Build the service against a local module checkout (untracked [patch.crates-io])
+    Link {
+        /// Module directory name, e.g. backbone-maintenance
+        module: String,
+        /// Checkout to link (default: the sibling metaphora checkout's modules/<module>)
+        #[arg(long)]
+        path: Option<std::path::PathBuf>,
+    },
+    /// Remove a local module link and, with the last one, restore Cargo.lock
+    Unlink {
+        /// Module directory or crate name
+        module: Option<String>,
+        /// Remove every link
+        #[arg(long, conflicts_with = "module")]
+        all: bool,
+    },
+    /// List the local module links
+    Links,
 }
 
 #[derive(Subcommand)]
@@ -379,6 +397,14 @@ pub async fn handle_command(action: &DevAction) -> Result<()> {
         DevAction::Build { release, test } => {
             build_project(*release, *test).await
         }
+        DevAction::Link { module, path } => super::link::link(module, path.as_deref()),
+        DevAction::Unlink { module, all } => {
+            if module.is_none() && !*all {
+                anyhow::bail!("name a module to unlink, or pass --all");
+            }
+            super::link::unlink(module.as_deref())
+        }
+        DevAction::Links => super::link::list(),
     }
 }
 
