@@ -5,6 +5,21 @@ All notable changes to `metaphor-plugin-dev` are documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0] - 2026-10-02
+
+### Added
+
+- `metaphor dev link <module> [--path <dir>]` builds the service against a local checkout of a
+  module before it is released (ADR-0030, Decision 9). It writes an untracked
+  `[patch.crates-io]` entry in the service's `.cargo/config.toml`, by a path relative to the
+  service, so the same entry resolves on the host and in the dev container with the metaphora
+  checkout mounted at `/frameworks/metaphora`. The default checkout is the sibling
+  `frameworks/metaphora/modules/<module>` (`METAPHORA_DIR` overrides it). A local version other
+  than the locked one is taken with `cargo update -p`; a link the build would still not use is
+  rolled back. The command refuses to run when `.cargo/config.toml` is not git-ignored.
+- `metaphor dev unlink <module>` / `--all` removes links; the first link saved `Cargo.lock` and
+  the last unlink restores it byte for byte. `metaphor dev links` lists them.
+
 ## [0.2.1] - 2026-09-13
 
 ### Fixed
